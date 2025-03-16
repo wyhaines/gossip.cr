@@ -174,7 +174,11 @@ class NetworkNode
         end
       end
     rescue ex : IO::Error | Socket::Error
-      puts "Connection error with #{remote_id}: #{ex.message}"
+      # Only log connection errors if we're still running
+      # This prevents noise during shutdown
+      if @running
+        puts "Connection error with #{remote_id}: #{ex.message}"
+      end
       @connections.delete(remote_id) unless remote_id.empty?
       client.close
     end
@@ -216,7 +220,7 @@ class NetworkNode
   def send_message(to : String, message : Message)
     remaining_attempts = 3
 
-    while remaining_attempts > 0
+    while remaining_attempts > 0 && @running
       begin
         if socket = get_or_create_connection(to)
           message_json = message.to_json
@@ -231,15 +235,17 @@ class NetworkNode
           socket.flush
           return # Success, exit the loop
         else
-          puts "Failed to connect to node #{to}"
+          if @running
+            puts "Failed to connect to node #{to}"
+          end
           return # No point retrying if we can't establish connection
         end
       rescue ex : IO::Error | Socket::Error
         remaining_attempts -= 1
-        if remaining_attempts > 0
+        if remaining_attempts > 0 && @running
           @connections.delete(to)
           puts "Failed to send message to #{to}, retrying... (#{remaining_attempts} attempts left)"
-        else
+        elsif @running
           puts "Failed to send message to #{to} after all retries: #{ex.message}"
           @connections.delete(to)
         end
