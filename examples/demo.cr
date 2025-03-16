@@ -1,4 +1,5 @@
 require "../src/gossip"
+require "../src/debug"  # Import the debug macro
 
 # Demo node class with enhanced message display and status information
 class DemoNode < Node
@@ -13,7 +14,8 @@ class DemoNode < Node
         @message_contents[message.message_id] = message.content
       end
 
-      # Print received message with clear formatting
+      # Print received message with clear formatting - this is user-facing output
+      # so we keep it on STDOUT
       puts "\n\033[32m[#{Time.utc}] Message from #{message.sender}:\033[0m"
       puts "\033[34m#{message.content}\033[0m"
       print_prompt
@@ -40,7 +42,7 @@ class DemoNode < Node
             send_message(node, forward_msg)
           end
         rescue ex
-          puts "Node #{@id}: Failed to forward message to #{node}: #{ex.message}"
+          debug_log "Node #{@id}: Failed to forward message to #{node}: #{ex.message}"
           handle_node_failure(node)
         end
       end
@@ -54,6 +56,7 @@ class DemoNode < Node
   end
 
   def print_status
+    # Print status is user-facing output so keep on STDOUT
     puts "\n\033[33mNetwork Status:\033[0m"
     @views_mutex.synchronize do
       puts "  Active connections: #{active_view.size}/#{MAX_ACTIVE}"

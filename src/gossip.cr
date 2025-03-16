@@ -2,6 +2,7 @@ require "set"
 require "socket"
 require "json"
 require "mutex"
+require "./debug"  # Import the debug macro
 
 # Abstract base struct for all messages
 abstract struct Message
@@ -145,7 +146,7 @@ class NetworkNode
     spawn do
       while @running
         if client = @server.accept?
-          puts "Accepted new connection"
+          debug_log "Accepted new connection"
           spawn handle_client(client)
         end
       end
@@ -155,13 +156,13 @@ class NetworkNode
     spawn do
       while @running
         begin
-          puts "Waiting for message on queue..."
+          debug_log "Waiting for message on queue..."
           message = @message_queue.receive
-          puts "Processing #{message.type} message from #{message.sender}"
+          debug_log "Processing #{message.type} message from #{message.sender}"
           if node = @node
             node.handle_message(message)
           else
-            puts "Warning: No node set to handle message"
+            debug_log "Warning: No node set to handle message"
           end
         rescue ex : Channel::ClosedError
           break
@@ -188,13 +189,13 @@ class NetworkNode
       
       while @running
         message = read_message(client)
-        puts "Received #{message.type} message from #{message.sender}"
+        debug_log "Received #{message.type} message from #{message.sender}"
 
         # Clean up the sender ID if it's malformed
         sender = message.sender
         if sender =~ /(.+@.+:\d+)@.+:\d+/
           sender = $1
-          puts "Cleaned up malformed sender ID from #{message.sender} to #{sender}"
+          debug_log "Cleaned up malformed sender ID from #{message.sender} to #{sender}"
         end
 
         case message
@@ -203,37 +204,37 @@ class NetworkNode
           # Store connection for future use if we don't already have one
           @connections_mutex.synchronize do
             if @connections.has_key?(remote_id)
-              puts "Already have connection for #{remote_id}, closing old one"
+              debug_log "Already have connection for #{remote_id}, closing old one"
               @connections[remote_id].close rescue nil
             end
-            puts "Storing new connection for #{remote_id}"
+            debug_log "Storing new connection for #{remote_id}"
             @connections[remote_id] = client
           end
           # Update message sender before queuing
           message = Join.new(sender)
           @message_queue.send(message)
-          puts "Queued Join message from #{remote_id}"
+          debug_log "Queued Join message from #{remote_id}"
         else
           if remote_id.empty?
             remote_id = sender
             @connections_mutex.synchronize do
               if @connections.has_key?(remote_id)
-                puts "Already have connection for #{remote_id}, closing old one"
+                debug_log "Already have connection for #{remote_id}, closing old one"
                 @connections[remote_id].close rescue nil
               end
-              puts "Storing new connection for #{remote_id}"
+              debug_log "Storing new connection for #{remote_id}"
               @connections[remote_id] = client
             end
           end
           @message_queue.send(message)
-          puts "Queued #{message.type} message from #{remote_id}"
+          debug_log "Queued #{message.type} message from #{remote_id}"
         end
       end
     rescue ex : IO::Error | Socket::Error | IO::TimeoutError
       # Only log connection errors if we're still running
       # This prevents noise during shutdown
       if @running
-        puts "Connection error with #{remote_id}: #{ex.message}"
+        debug_log "Connection error with #{remote_id}: #{ex.message}"
       end
       @connections_mutex.synchronize do
         @connections.delete(remote_id) unless remote_id.empty?
@@ -265,7 +266,7 @@ class NetworkNode
     raise IO::Error.new("Connection closed") unless bytes_read
 
     message_json = String.new(message_bytes)
-    puts "Received message: #{message_json}" # Debug log
+    debug_log "Received message: #{message_json}" # Debug log
 
     # Parse message based on type
     msg_data = JSON.parse(message_json)
@@ -297,7 +298,7 @@ class NetworkNode
           message_bytes = message_json.to_slice
           len = message_bytes.size
 
-          puts "Sending #{message.type} message to #{to} (#{len} bytes)"
+          debug_log "Sending #{message.type} message to #{to} (#{len} bytes)"
 
           # Send length prefix
           len_bytes = Bytes.new(4)
@@ -308,7 +309,7 @@ class NetworkNode
           return # Success, exit the loop
         else
           if @running
-            puts "Failed to connect to node #{to}"
+            debug_log "Failed to connect to node #{to}"
           end
           # Throw exception if we can't establish connection - this is important
           # for error propagation to handle failed nodes
@@ -321,9 +322,9 @@ class NetworkNode
         end
         
         if remaining_attempts > 0 && @running
-          puts "Failed to send message to #{to}, retrying... (#{remaining_attempts} attempts left): #{ex.message}"
+          debug_log "Failed to send message to #{to}, retrying... (#{remaining_attempts} attempts left): #{ex.message}"
         elsif @running
-          puts "Failed to send message to #{to} after all retries: #{ex.message}"
+          debug_log "Failed to send message to #{to} after all retries: #{ex.message}"
           # Re-raise the exception so the caller knows about the failure
           raise ex
         end
@@ -348,7 +349,7 @@ class NetworkNode
     if socket
       begin
         # Test if connection is still alive
-        puts "Testing connection to #{node_id}"
+        debug_log "Testing connection to #{node_id}"
         test_bytes = Bytes.new(4, 0_u8) # Four zero bytes for test
         socket.write(test_bytes)
         socket.flush
@@ -358,13 +359,13 @@ class NetworkNode
         response = Bytes.new(4)
         bytes_read = socket.read_fully?(response)
         if !bytes_read || !response.all? { |b| b == 0 }
-          puts "Invalid test response from #{node_id}"
+          debug_log "Invalid test response from #{node_id}"
           raise Socket::Error.new("Invalid test response")
         end
 
         return socket
       rescue ex
-        puts "Existing connection to #{node_id} is dead: #{ex.message}"
+        debug_log "Existing connection to #{node_id} is dead: #{ex.message}"
         @connections_mutex.synchronize do
           @connections.delete(node_id)
         end
@@ -374,7 +375,7 @@ class NetworkNode
     if node_id =~ /(.+)@(.+):(\d+)/
       id, host, port = $1, $2, $3.to_i
       begin
-        puts "Creating new connection to #{node_id}"
+        debug_log "Creating new connection to #{node_id}"
         socket = TCPSocket.new(host, port, connect_timeout: SOCKET_TIMEOUT.seconds)
         socket.tcp_nodelay = true          # Disable Nagle's algorithm
         socket.keepalive = true            # Enable TCP keepalive
@@ -391,7 +392,7 @@ class NetworkNode
         message_bytes = message_json.to_slice
         len = message_bytes.size
 
-        puts "Sending initial Join message (#{len} bytes): #{message_json}"
+        debug_log "Sending initial Join message (#{len} bytes): #{message_json}"
         len_bytes = Bytes.new(4)
         IO::ByteFormat::NetworkEndian.encode(len, len_bytes)
         socket.write(len_bytes)
@@ -401,10 +402,10 @@ class NetworkNode
         @connections_mutex.synchronize do
           @connections[node_id] = socket
         end
-        puts "Successfully established connection to #{node_id}"
+        debug_log "Successfully established connection to #{node_id}"
         return socket
       rescue ex : Socket::Error | IO::TimeoutError
-        puts "Failed to connect to #{node_id}: #{ex.message}"
+        debug_log "Failed to connect to #{node_id}: #{ex.message}"
         return nil
       end
     end
@@ -418,7 +419,7 @@ class NetworkNode
         return true
       end
     rescue ex
-      puts "Connection test to #{node_id} failed: #{ex.message}"
+      debug_log "Connection test to #{node_id} failed: #{ex.message}"
     end
     false
   end
@@ -509,7 +510,7 @@ class Node
     begin
       @network.send_message(to, message)
     rescue ex : IO::Error | Socket::Error | IO::TimeoutError
-      puts "Node #{@id}: Error sending #{message.type} to #{to}: #{ex.message}"
+      debug_log "Node #{@id}: Error sending #{message.type} to #{to}: #{ex.message}"
       handle_node_failure(to)
       raise ex # Re-raise to allow caller to handle
     end
@@ -529,7 +530,7 @@ class Node
         heartbeat = Heartbeat.new(@id)
         send_message(node, heartbeat)
       rescue ex
-        puts "Node #{@id}: Heartbeat to #{node} failed: #{ex.message}"
+        debug_log "Node #{@id}: Heartbeat to #{node} failed: #{ex.message}"
         failed_nodes << node
       end
     end
@@ -545,7 +546,7 @@ class Node
     @views_mutex.synchronize do
       if @active_view.includes?(node)
         @active_view.delete(node)
-        puts "Node #{@id}: Removed failed node #{node} from active view"
+        debug_log "Node #{@id}: Removed failed node #{node} from active view"
         
         @failures_mutex.synchronize do
           @failed_nodes << node
@@ -573,13 +574,13 @@ class Node
           join_msg = Join.new(@id)
           send_message(candidate, join_msg)
           @active_view << candidate
-          puts "Node #{@id}: Promoted #{candidate} from passive to active view"
+          debug_log "Node #{@id}: Promoted #{candidate} from passive to active view"
           break # Exit once we successfully promote one node
         rescue ex
           @failures_mutex.synchronize do
             @failed_nodes << candidate
           end
-          puts "Node #{@id}: Failed to promote #{candidate}: #{ex.message}"
+          debug_log "Node #{@id}: Failed to promote #{candidate}: #{ex.message}"
         end
       end
     end
@@ -611,7 +612,7 @@ class Node
     when HeartbeatAck
       handle_heartbeat_ack(message)
     else
-      puts "Node #{@id}: Unknown message type"
+      debug_log "Node #{@id}: Unknown message type"
     end
   end
   
@@ -622,7 +623,7 @@ class Node
     begin
       send_message(message.sender, ack)
     rescue ex
-      puts "Node #{@id}: Failed to send heartbeat ack to #{message.sender}: #{ex.message}"
+      debug_log "Node #{@id}: Failed to send heartbeat ack to #{message.sender}: #{ex.message}"
     end
   end
   
@@ -669,7 +670,7 @@ class Node
   # Handle a new node joining via this node
   def handle_join(message : Join)
     sender = message.sender
-    puts "Node #{@id}: Received JOIN from #{sender}"
+    debug_log "Node #{@id}: Received JOIN from #{sender}"
 
     # Remove from failed nodes if it was there
     @failures_mutex.synchronize do
@@ -680,21 +681,21 @@ class Node
     @views_mutex.synchronize do
       # If we're already connected, just update views
       if @active_view.includes?(sender)
-        puts "Node #{@id}: Already connected to #{sender}"
+        debug_log "Node #{@id}: Already connected to #{sender}"
         return
       end
 
       # Add to active view if there's space
       if @active_view.size < MAX_ACTIVE
         @active_view << sender
-        puts "Node #{@id}: Added #{sender} to active view"
+        debug_log "Node #{@id}: Added #{sender} to active view"
       else
         # Move random node to passive view
         displaced = @active_view.to_a.sample
         @active_view.delete(displaced)
         @passive_view << displaced unless displaced == sender || @failed_nodes.includes?(displaced)
         @active_view << sender
-        puts "Node #{@id}: Displaced #{displaced} to passive view"
+        debug_log "Node #{@id}: Displaced #{displaced} to passive view"
       end
     end
 
@@ -711,9 +712,9 @@ class Node
     begin
       init_msg = InitViews.new(@id, active_nodes, passive_nodes)
       send_message(sender, init_msg)
-      puts "Node #{@id}: Sent InitViews to #{sender}"
+      debug_log "Node #{@id}: Sent InitViews to #{sender}"
     rescue ex
-      puts "Node #{@id}: Failed to send InitViews to #{sender}: #{ex.message}"
+      debug_log "Node #{@id}: Failed to send InitViews to #{sender}: #{ex.message}"
       handle_node_failure(sender)
       return
     end
@@ -731,9 +732,9 @@ class Node
         begin
           forward_msg = ForwardJoin.new(@id, sender, TTL)
           send_message(target, forward_msg)
-          puts "Node #{@id}: Forwarded join from #{sender} to #{target}"
+          debug_log "Node #{@id}: Forwarded join from #{sender} to #{target}"
         rescue ex
-          puts "Node #{@id}: Failed to forward join to #{target}: #{ex.message}"
+          debug_log "Node #{@id}: Failed to forward join to #{target}: #{ex.message}"
           handle_node_failure(target)
         end
       end
@@ -758,7 +759,7 @@ class Node
           forward_msg = ForwardJoin.new(@id, new_node, ttl - 1)
           send_message(node, forward_msg)
         rescue ex
-          puts "Node #{@id}: Failed to forward join to #{node}: #{ex.message}"
+          debug_log "Node #{@id}: Failed to forward join to #{node}: #{ex.message}"
           handle_node_failure(node)
         end
       end
@@ -766,7 +767,7 @@ class Node
       @views_mutex.synchronize do
         @passive_view << new_node unless @active_view.includes?(new_node) || new_node == @id
       end
-      puts "Node #{@id}: Added #{new_node} to passive view"
+      debug_log "Node #{@id}: Added #{new_node} to passive view"
     end
   end
 
@@ -795,9 +796,9 @@ class Node
           end
         end
       end
-      puts "Node #{@id}: Shuffled with #{sender}"
+      debug_log "Node #{@id}: Shuffled with #{sender}"
     rescue ex
-      puts "Node #{@id}: Failed to send shuffle reply to #{sender}: #{ex.message}"
+      debug_log "Node #{@id}: Failed to send shuffle reply to #{sender}: #{ex.message}"
       handle_node_failure(sender)
     end
   end
@@ -818,13 +819,13 @@ class Node
   # Initialize views for a new node
   def handle_init_views(message : InitViews)
     sender = message.sender
-    puts "Node #{@id}: Received InitViews from #{sender}"
+    debug_log "Node #{@id}: Received InitViews from #{sender}"
 
     # Add sender to our active view if not already present
     @views_mutex.synchronize do
       if !@active_view.includes?(sender)
         @active_view << sender
-        puts "Node #{@id}: Added #{sender} to active view"
+        debug_log "Node #{@id}: Added #{sender} to active view"
       end
     end
 
@@ -840,9 +841,9 @@ class Node
           begin
             join_msg = Join.new(@id)
             send_message(node, join_msg)
-            puts "Node #{@id}: Sent Join to suggested active node #{node}"
+            debug_log "Node #{@id}: Sent Join to suggested active node #{node}"
           rescue ex
-            puts "Node #{@id}: Failed to send Join to suggested node #{node}: #{ex.message}"
+            debug_log "Node #{@id}: Failed to send Join to suggested node #{node}: #{ex.message}"
             @failures_mutex.synchronize do
               @failed_nodes << node
             end
@@ -851,7 +852,7 @@ class Node
           # Add to passive view if not full
           if @passive_view.size < MAX_PASSIVE
             @passive_view << node
-            puts "Node #{@id}: Added suggested node #{node} to passive view"
+            debug_log "Node #{@id}: Added suggested node #{node} to passive view"
           end
         end
       end
@@ -863,12 +864,12 @@ class Node
         next if node == @id || @active_view.includes?(node)
         if @passive_view.size < MAX_PASSIVE
           @passive_view << node
-          puts "Node #{@id}: Added #{node} to passive view"
+          debug_log "Node #{@id}: Added #{node} to passive view"
         end
       end
     end
 
-    puts "Node #{@id}: Initialized views - Active: #{@active_view.to_a}, Passive: #{@passive_view.to_a}"
+    debug_log "Node #{@id}: Initialized views - Active: #{@active_view.to_a}, Passive: #{@passive_view.to_a}"
   end
 
   # Handle a broadcast message (Plumtree eager/lazy push)
@@ -887,7 +888,7 @@ class Node
     end
     
     if !already_received
-      puts "Node #{@id}: Received broadcast '#{message.content}' from #{sender}"
+      debug_log "Node #{@id}: Received broadcast '#{message.content}' from #{sender}"
 
       # Get active view snapshot
       active_nodes = [] of String
@@ -908,14 +909,14 @@ class Node
           if rand < @lazy_push_probability
             lazy_msg = LazyPushMessage.new(@id, message_id)
             send_message(node, lazy_msg)
-            puts "Node #{@id}: Sent lazy push for message to #{node}"
+            debug_log "Node #{@id}: Sent lazy push for message to #{node}"
           else
             forward_msg = BroadcastMessage.new(@id, message_id, message.content)
             send_message(node, forward_msg)
-            puts "Node #{@id}: Forwarded broadcast to #{node}"
+            debug_log "Node #{@id}: Forwarded broadcast to #{node}"
           end
         rescue ex
-          puts "Node #{@id}: Failed to forward broadcast to #{node}: #{ex.message}"
+          debug_log "Node #{@id}: Failed to forward broadcast to #{node}: #{ex.message}"
           handle_node_failure(node)
         end
       end
@@ -952,9 +953,9 @@ class Node
           request_msg = MessageRequest.new(@id, message_id, true)
           begin
             send_message(sender, request_msg)
-            puts "Node #{@id}: Requested missing message #{message_id} from #{sender}"
+            debug_log "Node #{@id}: Requested missing message #{message_id} from #{sender}"
           rescue ex
-            puts "Node #{@id}: Failed to request message from #{sender}: #{ex.message}"
+            debug_log "Node #{@id}: Failed to request message from #{sender}: #{ex.message}"
             # Don't remove from pending - will be retried by recovery process
             handle_node_failure(sender)
           end
@@ -966,8 +967,7 @@ class Node
   # Background fiber to handle message recovery
   private def handle_message_recovery
     while @network.running
-      sleep(REQUEST_RETRY_INTERVAL)
-      
+      sleep(Time::Span.new(seconds: REQUEST_RETRY_INTERVAL.to_i, nanoseconds: ((REQUEST_RETRY_INTERVAL % 1) * 1_000_000_000).to_i))      
       # Get messages that need recovery
       messages_to_recover = {} of String => Array(String)
       @messages_mutex.synchronize do
@@ -997,7 +997,7 @@ class Node
             success = true
             break # Successfully sent request
           rescue ex
-            puts "Node #{@id}: Failed to request message recovery from #{provider}: #{ex.message}"
+            debug_log "Node #{@id}: Failed to request message recovery from #{provider}: #{ex.message}"
             handle_node_failure(provider)
           end
         end
@@ -1013,10 +1013,10 @@ class Node
             begin
               request_msg = MessageRequest.new(@id, message_id, false)
               send_message(node, request_msg)
-              puts "Node #{@id}: Last resort message request to #{node}"
+              debug_log "Node #{@id}: Last resort message request to #{node}"
               break # Successfully sent request
             rescue ex
-              puts "Node #{@id}: Failed last resort request to #{node}: #{ex.message}"
+              debug_log "Node #{@id}: Failed last resort request to #{node}: #{ex.message}"
               handle_node_failure(node)
             end
           end
@@ -1040,13 +1040,13 @@ class Node
       begin
         response_msg = MessageResponse.new(@id, message_id, content)
         send_message(sender, response_msg)
-        puts "Node #{@id}: Sent message response for #{message_id} to #{sender}"
+        debug_log "Node #{@id}: Sent message response for #{message_id} to #{sender}"
       rescue ex
-        puts "Node #{@id}: Failed to send message response to #{sender}: #{ex.message}"
+        debug_log "Node #{@id}: Failed to send message response to #{sender}: #{ex.message}"
         handle_node_failure(sender)
       end
     else
-      puts "Node #{@id}: Requested message #{message_id} not found for #{sender}"
+      debug_log "Node #{@id}: Requested message #{message_id} not found for #{sender}"
     end
   end
 
@@ -1072,7 +1072,7 @@ class Node
     end
     
     if was_missing
-      puts "Node #{@id}: Recovered missing message #{message_id}"
+      debug_log "Node #{@id}: Recovered missing message #{message_id}"
       
       # Get active view snapshot
       active_nodes = [] of String
@@ -1091,9 +1091,9 @@ class Node
         begin
           forward_msg = BroadcastMessage.new(@id, message_id, content)
           send_message(node, forward_msg)
-          puts "Node #{@id}: Forwarded recovered message to #{node}"
+          debug_log "Node #{@id}: Forwarded recovered message to #{node}"
         rescue ex
-          puts "Node #{@id}: Failed to forward recovered message to #{node}: #{ex.message}"
+          debug_log "Node #{@id}: Failed to forward recovered message to #{node}: #{ex.message}"
           handle_node_failure(node)
         end
       end
@@ -1116,7 +1116,7 @@ class Node
         shuffle_msg = Shuffle.new(@id, shuffle_nodes)
         send_message(target, shuffle_msg)
       rescue ex
-        puts "Node #{@id}: Failed to send shuffle to #{target}: #{ex.message}"
+        debug_log "Node #{@id}: Failed to send shuffle to #{target}: #{ex.message}"
         handle_node_failure(target)
       end
     end
@@ -1133,7 +1133,7 @@ class Node
       @message_contents[message_id] = content
     end
 
-    puts "Node #{@id}: Broadcasting message '#{content}'"
+    debug_log "Node #{@id}: Broadcasting message '#{content}'"
 
     # Get active view snapshot
     active_nodes = [] of String
@@ -1150,9 +1150,9 @@ class Node
       begin
         # Use eager push for initial broadcast to speed up propagation
         send_message(node, msg)
-        puts "Node #{@id}: Sent broadcast to #{node}"
+        debug_log "Node #{@id}: Sent broadcast to #{node}"
       rescue ex
-        puts "Node #{@id}: Failed to send broadcast to #{node}: #{ex.message}"
+        debug_log "Node #{@id}: Failed to send broadcast to #{node}: #{ex.message}"
         handle_node_failure(node)
       end
     end
