@@ -542,46 +542,60 @@ class Node
   end
 
   # Handle node failures
-  private def handle_node_failure(node : String)
+  def handle_node_failure(node : String)
+    # Check if the node is in active view first
+    is_active = false
     @views_mutex.synchronize do
-      if @active_view.includes?(node)
+      is_active = @active_view.includes?(node)
+      if is_active
         @active_view.delete(node)
         debug_log "Node #{@id}: Removed failed node #{node} from active view"
-        
-        @failures_mutex.synchronize do
-          @failed_nodes << node
-        end
-        
-        # Try to promote a node from passive view
-        promote_passive_node
       end
+    end
+    
+    # Mark as failed
+    @failures_mutex.synchronize do
+      @failed_nodes << node
+    end
+    
+    # Promote a passive node if needed (and the failed node was active)
+    if is_active
+      promote_passive_node
     end
   end
   
-  # Promote a node from passive to active view
   private def promote_passive_node
+    # Get candidate nodes from passive view
+    passive_nodes = [] of String
     @views_mutex.synchronize do
       return if @active_view.size >= MIN_ACTIVE || @passive_view.empty?
-      
-      # Try nodes from passive view until one works
       passive_nodes = @passive_view.to_a.shuffle
-      
-      passive_nodes.each do |candidate|
+    end
+    
+    # Try nodes from passive view until one works
+    passive_nodes.each do |candidate|
+      # Remove from passive view first
+      @views_mutex.synchronize do
         @passive_view.delete(candidate)
+      end
+      
+      begin
+        # Try to establish connection
+        join_msg = Join.new(@id)
+        send_message(candidate, join_msg)
         
-        begin
-          # Try to establish connection
-          join_msg = Join.new(@id)
-          send_message(candidate, join_msg)
+        # Add to active view if successful
+        @views_mutex.synchronize do
           @active_view << candidate
-          debug_log "Node #{@id}: Promoted #{candidate} from passive to active view"
-          break # Exit once we successfully promote one node
-        rescue ex
-          @failures_mutex.synchronize do
-            @failed_nodes << candidate
-          end
-          debug_log "Node #{@id}: Failed to promote #{candidate}: #{ex.message}"
         end
+        
+        debug_log "Node #{@id}: Promoted #{candidate} from passive to active view"
+        break # Exit once we successfully promote one node
+      rescue ex
+        @failures_mutex.synchronize do
+          @failed_nodes << candidate
+        end
+        debug_log "Node #{@id}: Failed to promote #{candidate}: #{ex.message}"
       end
     end
   end
@@ -653,17 +667,21 @@ class Node
         failed_nodes << node
       end
     end
-
+  
     # Process failed nodes
     failed_nodes.each do |node|
       handle_node_failure(node)
     end
-
-    # Try to promote nodes from passive view if active view is low
+  
+    # Check if we need to promote passive nodes
+    should_promote = false
     @views_mutex.synchronize do
-      if @active_view.size < MIN_ACTIVE
-        promote_passive_node
-      end
+      should_promote = @active_view.size < MIN_ACTIVE
+    end
+    
+    # Call promote outside of the mutex lock if needed
+    if should_promote
+      promote_passive_node
     end
   end
 
