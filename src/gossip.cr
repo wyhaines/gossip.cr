@@ -129,6 +129,7 @@ class NetworkNode
     spawn do
       while @running
         if client = @server.accept?
+          puts "Accepted new connection"
           spawn handle_client(client)
         end
       end
@@ -138,9 +139,13 @@ class NetworkNode
     spawn do
       while @running
         begin
+          puts "Waiting for message on queue..."
           message = @message_queue.receive
+          puts "Processing #{message.type} message from #{message.sender}"
           if node = @node
             node.handle_message(message)
+          else
+            puts "Warning: No node set to handle message"
           end
         rescue ex : Channel::ClosedError
           break
@@ -163,14 +168,41 @@ class NetworkNode
     begin
       while @running
         message = read_message(client)
+        puts "Received #{message.type} message from #{message.sender}"
+
+        # Clean up the sender ID if it's malformed
+        sender = message.sender
+        if sender =~ /(.+@.+:\d+)@.+:\d+/
+          sender = $1
+          puts "Cleaned up malformed sender ID from #{message.sender} to #{sender}"
+        end
+
         case message
         when Join
-          remote_id = message.sender
+          remote_id = sender
           # Store connection for future use if we don't already have one
-          @connections[remote_id] = client unless @connections.has_key?(remote_id)
+          if @connections.has_key?(remote_id)
+            puts "Already have connection for #{remote_id}, closing old one"
+            @connections[remote_id].close
+          end
+          puts "Storing new connection for #{remote_id}"
+          @connections[remote_id] = client
+          # Update message sender before queuing
+          message = Join.new(sender)
           @message_queue.send(message)
+          puts "Queued Join message from #{remote_id}"
         else
+          if remote_id.empty?
+            remote_id = sender
+            if @connections.has_key?(remote_id)
+              puts "Already have connection for #{remote_id}, closing old one"
+              @connections[remote_id].close
+            end
+            puts "Storing new connection for #{remote_id}"
+            @connections[remote_id] = client
+          end
           @message_queue.send(message)
+          puts "Queued #{message.type} message from #{remote_id}"
         end
       end
     rescue ex : IO::Error | Socket::Error
@@ -186,18 +218,28 @@ class NetworkNode
 
   # Read a message from a socket with timeout
   private def read_message(socket : TCPSocket) : Message
+    # Read the length prefix (4 bytes)
     len_bytes = Bytes.new(4)
     bytes_read = socket.read_fully?(len_bytes)
     raise IO::Error.new("Connection closed") unless bytes_read
 
+    # Check if this is a connection test (all bytes should be 0)
+    if len_bytes.all? { |b| b == 0 }
+      # Send acknowledgment
+      socket.write(len_bytes)
+      socket.flush
+      return read_message(socket)
+    end
+
     len = IO::ByteFormat::NetworkEndian.decode(Int32, len_bytes)
-    raise IO::Error.new("Invalid message length") if len <= 0 || len > 1024*1024 # Sanity check
+    raise IO::Error.new("Invalid message length: #{len}") if len <= 0 || len > 1024*1024 # Sanity check
 
     message_bytes = Bytes.new(len)
     bytes_read = socket.read_fully?(message_bytes)
     raise IO::Error.new("Connection closed") unless bytes_read
 
     message_json = String.new(message_bytes)
+    puts "Received message: #{message_json}" # Debug log
 
     # Parse message based on type
     msg_data = JSON.parse(message_json)
@@ -227,6 +269,8 @@ class NetworkNode
           message_bytes = message_json.to_slice
           len = message_bytes.size
 
+          puts "Sending #{message.type} message to #{to} (#{len} bytes)"
+
           # Send length prefix
           len_bytes = Bytes.new(4)
           IO::ByteFormat::NetworkEndian.encode(len, len_bytes)
@@ -255,11 +299,34 @@ class NetworkNode
 
   # Get existing connection or create new one with proper handshake
   private def get_or_create_connection(node_id : String) : TCPSocket?
-    return @connections[node_id] if @connections.has_key?(node_id)
+    # Check if we have a valid existing connection
+    if socket = @connections[node_id]?
+      begin
+        # Test if connection is still alive
+        puts "Testing connection to #{node_id}"
+        test_bytes = Bytes.new(4, 0_u8) # Four zero bytes for test
+        socket.write(test_bytes)
+        socket.flush
+
+        # Wait for acknowledgment
+        response = Bytes.new(4)
+        bytes_read = socket.read_fully?(response)
+        if !bytes_read || !response.all? { |b| b == 0 }
+          puts "Invalid test response from #{node_id}"
+          raise Socket::Error.new("Invalid test response")
+        end
+
+        return socket
+      rescue ex
+        puts "Existing connection to #{node_id} is dead: #{ex.message}"
+        @connections.delete(node_id)
+      end
+    end
 
     if node_id =~ /(.+)@(.+):(\d+)/
       id, host, port = $1, $2, $3.to_i
       begin
+        puts "Creating new connection to #{node_id}"
         socket = TCPSocket.new(host, port)
         socket.tcp_nodelay = true          # Disable Nagle's algorithm
         socket.keepalive = true            # Enable TCP keepalive
@@ -268,11 +335,13 @@ class NetworkNode
         socket.tcp_keepalive_count = 3     # Drop connection after 3 failed probes
 
         # Send join message to identify ourselves
-        join_msg = Join.new(@address.id)
+        # Use the node's ID directly to avoid double-appending host:port
+        join_msg = Join.new(@node.not_nil!.id)
         message_json = join_msg.to_json
         message_bytes = message_json.to_slice
         len = message_bytes.size
 
+        puts "Sending initial Join message (#{len} bytes): #{message_json}"
         len_bytes = Bytes.new(4)
         IO::ByteFormat::NetworkEndian.encode(len, len_bytes)
         socket.write(len_bytes)
@@ -280,6 +349,7 @@ class NetworkNode
         socket.flush
 
         @connections[node_id] = socket
+        puts "Successfully established connection to #{node_id}"
         return socket
       rescue ex : Socket::Error
         puts "Failed to connect to #{node_id}: #{ex.message}"
@@ -308,6 +378,7 @@ class Node
   property missing_messages : Set(String)
   property lazy_push_probability : Float64
   property network : NetworkNode
+  property failed_nodes : Set(String)
 
   # Configuration constants
   MAX_ACTIVE       =   5 # Max size of active view
@@ -317,7 +388,7 @@ class Node
   SHUFFLE_SIZE     =   3 # Number of nodes to exchange in shuffle
   MIN_ACTIVE       =   2 # Min nodes to send for new node's active view
   MIN_PASSIVE      =   3 # Min nodes to send for new node's passive view
-  LAZY_PUSH_PROB   = 0.3 # Default probability for lazy push
+  LAZY_PUSH_PROB   = 0.1 # Reduced probability for lazy push to improve propagation speed
 
   def initialize(id : String, network : NetworkNode)
     @id = id
@@ -328,14 +399,16 @@ class Node
     @message_contents = Hash(String, String).new
     @missing_messages = Set(String).new
     @lazy_push_probability = LAZY_PUSH_PROB
+    @failed_nodes = Set(String).new
 
     # Set this node as the network's node
     @network.node = self
 
-    # Start periodic shuffling
+    # Start periodic shuffling and view maintenance
     spawn do
       while @network.running
         sleep(Time::Span.new(seconds: SHUFFLE_INTERVAL.to_i, nanoseconds: ((SHUFFLE_INTERVAL % 1) * 1_000_000_000).to_i))
+        maintain_views
         send_shuffle
       end
     end
@@ -372,41 +445,86 @@ class Node
     end
   end
 
+  # New method to maintain views and handle disconnected nodes
+  private def maintain_views
+    # Test connections to active view nodes
+    failed_nodes = Set(String).new
+    @active_view.each do |node|
+      begin
+        # Try to send a test message
+        send_message(node, Join.new(@id))
+      rescue ex
+        failed_nodes << node
+      end
+    end
+
+    # Remove failed nodes from active view
+    failed_nodes.each do |node|
+      @active_view.delete(node)
+      @failed_nodes << node
+      puts "Node #{@id}: Removed failed node #{node} from active view"
+    end
+
+    # Try to promote nodes from passive view if active view is low
+    while @active_view.size < MIN_ACTIVE && !@passive_view.empty?
+      candidate = @passive_view.to_a.sample
+      @passive_view.delete(candidate)
+
+      begin
+        # Try to establish connection
+        join_msg = Join.new(@id)
+        send_message(candidate, join_msg)
+        @active_view << candidate
+        puts "Node #{@id}: Promoted #{candidate} from passive to active view"
+      rescue ex
+        @failed_nodes << candidate
+        puts "Node #{@id}: Failed to promote #{candidate} - node unreachable"
+      end
+    end
+  end
+
   # Handle a new node joining via this node
   def handle_join(message : Join)
     sender = message.sender
     puts "Node #{@id}: Received JOIN from #{sender}"
 
+    # Remove from failed nodes if it was there
+    @failed_nodes.delete(sender)
+
     # If we're already connected, just update views
     if @active_view.includes?(sender)
+      puts "Node #{@id}: Already connected to #{sender}"
       return
     end
 
     # Add to active view if there's space
     if @active_view.size < MAX_ACTIVE
       @active_view << sender
+      puts "Node #{@id}: Added #{sender} to active view"
     else
       # Move random node to passive view
       displaced = @active_view.to_a.sample
       @active_view.delete(displaced)
-      @passive_view << displaced unless displaced == sender
+      @passive_view << displaced unless displaced == sender || @failed_nodes.includes?(displaced)
       @active_view << sender
       puts "Node #{@id}: Displaced #{displaced} to passive view"
     end
 
     # Send our views to the new node
-    active_nodes = @active_view.to_a.reject { |n| n == sender }
-    passive_nodes = @passive_view.to_a
+    active_nodes = @active_view.to_a.reject { |n| n == sender || @failed_nodes.includes?(n) }
+    passive_nodes = @passive_view.to_a.reject { |n| @failed_nodes.includes?(n) }
     init_msg = InitViews.new(@id, active_nodes, passive_nodes)
     send_message(sender, init_msg)
+    puts "Node #{@id}: Sent InitViews to #{sender}"
 
     # Propagate join to some nodes in our active view
-    forward_count = Math.min(@active_view.size, 2) # Forward to at most 2 other nodes
+    forward_count = Math.min(@active_view.size - 1, 2) # Forward to at most 2 other nodes
     if forward_count > 0
-      targets = @active_view.to_a.reject { |n| n == sender }.sample(forward_count)
+      targets = @active_view.to_a.reject { |n| n == sender || @failed_nodes.includes?(n) }.sample(forward_count)
       targets.each do |target|
         forward_msg = ForwardJoin.new(@id, sender, TTL)
         send_message(target, forward_msg)
+        puts "Node #{@id}: Forwarded join from #{sender} to #{target}"
       end
     end
   end
@@ -456,27 +574,36 @@ class Node
   # Initialize views for a new node
   def handle_init_views(message : InitViews)
     sender = message.sender
+    puts "Node #{@id}: Received InitViews from #{sender}"
 
     # Add sender to our active view if not already present
-    @active_view << sender unless @active_view.includes?(sender)
+    if !@active_view.includes?(sender)
+      @active_view << sender
+      puts "Node #{@id}: Added #{sender} to active view"
+    end
 
     # Process suggested active nodes
     message.active_nodes.each do |node|
       next if node == @id || @active_view.includes?(node)
       if @active_view.size < MAX_ACTIVE
-        # Try to establish connection by sending a join
+        # Try to establish bidirectional connection by sending a join
         join_msg = Join.new(@id)
         send_message(node, join_msg)
+        puts "Node #{@id}: Sent Join to suggested active node #{node}"
       else
         # Add to passive view if not full
         @passive_view << node if @passive_view.size < MAX_PASSIVE
+        puts "Node #{@id}: Added suggested node #{node} to passive view"
       end
     end
 
     # Add passive nodes
     message.passive_nodes.each do |node|
       next if node == @id || @active_view.includes?(node)
-      @passive_view << node if @passive_view.size < MAX_PASSIVE
+      if @passive_view.size < MAX_PASSIVE
+        @passive_view << node
+        puts "Node #{@id}: Added #{node} to passive view"
+      end
     end
 
     puts "Node #{@id}: Initialized views - Active: #{@active_view.to_a}, Passive: #{@passive_view.to_a}"
@@ -488,18 +615,27 @@ class Node
       @received_messages << message.message_id
       @message_contents[message.message_id] = message.content
 
-      # Forward to active view nodes
-      @active_view.each do |node|
-        next if node == message.sender
+      puts "Node #{@id}: Received broadcast '#{message.content}' from #{message.sender}"
 
-        # Use lazy push with probability
-        if rand < @lazy_push_probability
-          lazy_msg = LazyPushMessage.new(@id, message.message_id)
-          send_message(node, lazy_msg)
-        else
-          # Create new broadcast message with us as sender
-          forward_msg = BroadcastMessage.new(@id, message.message_id, message.content)
-          send_message(node, forward_msg)
+      # Forward immediately to all active view nodes except sender
+      @active_view.each do |node|
+        next if node == message.sender || @failed_nodes.includes?(node)
+
+        begin
+          # Reduced lazy push probability for faster propagation
+          if rand < @lazy_push_probability
+            lazy_msg = LazyPushMessage.new(@id, message.message_id)
+            send_message(node, lazy_msg)
+            puts "Node #{@id}: Sent lazy push for message to #{node}"
+          else
+            forward_msg = BroadcastMessage.new(@id, message.message_id, message.content)
+            send_message(node, forward_msg)
+            puts "Node #{@id}: Forwarded broadcast to #{node}"
+          end
+        rescue ex
+          @failed_nodes << node
+          @active_view.delete(node)
+          puts "Node #{@id}: Failed to forward to #{node} - removing from active view"
         end
       end
     end
@@ -562,13 +698,19 @@ class Node
     @received_messages << message_id
     @message_contents[message_id] = content
 
+    puts "Node #{@id}: Broadcasting message '#{content}'"
+
     # Send to all active view members
     @active_view.each do |node|
-      if rand < @lazy_push_probability
-        lazy_msg = LazyPushMessage.new(@id, message_id)
-        send_message(node, lazy_msg)
-      else
+      next if @failed_nodes.includes?(node)
+      begin
+        # Use eager push for initial broadcast to speed up propagation
         send_message(node, msg)
+        puts "Node #{@id}: Sent broadcast to #{node}"
+      rescue ex
+        @failed_nodes << node
+        @active_view.delete(node)
+        puts "Node #{@id}: Failed to send to #{node} - removing from active view"
       end
     end
   end
