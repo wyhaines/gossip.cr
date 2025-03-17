@@ -12,7 +12,7 @@ module Gossip
     # Node class implementing the gossip protocol
     class Node
       include Config
-      
+
       property id : String
       property active_view : Set(String)
       property passive_view : Set(String)
@@ -22,7 +22,7 @@ module Gossip
       property lazy_push_probability : Float64
       property network : Network::NetworkNode
       property failed_nodes : Set(String)
-      
+
       # Mutexes for thread safety
       @views_mutex = Mutex.new
       @messages_mutex = Mutex.new
@@ -52,7 +52,7 @@ module Gossip
             send_shuffle
           end
         end
-        
+
         # Start heartbeat mechanism to detect failed nodes
         spawn do
           while @network.running
@@ -60,7 +60,7 @@ module Gossip
             send_heartbeats
           end
         end
-        
+
         # Start message recovery process
         spawn handle_message_recovery
       end
@@ -87,18 +87,18 @@ module Gossip
             debug_log "Node #{@id}: Removed failed node #{node} from active view"
           end
         end
-        
+
         # Mark as failed
         @failures_mutex.synchronize do
           @failed_nodes << node
         end
-        
+
         # Promote a passive node if needed (and the failed node was active)
         if is_active
           promote_passive_node
         end
       end
-      
+
       private def promote_passive_node
         # Get candidate nodes from passive view
         passive_nodes = [] of String
@@ -106,24 +106,24 @@ module Gossip
           return if @active_view.size >= MIN_ACTIVE || @passive_view.empty?
           passive_nodes = @passive_view.to_a.shuffle
         end
-        
+
         # Try nodes from passive view until one works
         passive_nodes.each do |candidate|
           # Remove from passive view first
           @views_mutex.synchronize do
             @passive_view.delete(candidate)
           end
-          
+
           begin
             # Try to establish connection
             join_msg = Messages::Membership::Join.new(@id)
             send_message(candidate, join_msg)
-            
+
             # Add to active view if successful
             @views_mutex.synchronize do
               @active_view << candidate
             end
-            
+
             debug_log "Node #{@id}: Promoted #{candidate} from passive to active view"
             break # Exit once we successfully promote one node
           rescue ex
@@ -141,9 +141,9 @@ module Gossip
         @views_mutex.synchronize do
           active_nodes = @active_view.to_a
         end
-        
+
         failed_nodes = [] of String
-        
+
         active_nodes.each do |node|
           begin
             heartbeat = Messages::Heartbeat::Heartbeat.new(@id)
@@ -153,7 +153,7 @@ module Gossip
             failed_nodes << node
           end
         end
-        
+
         # Process failed nodes outside the loop to avoid modifying while iterating
         failed_nodes.each do |node|
           handle_node_failure(node)
@@ -167,9 +167,9 @@ module Gossip
         @views_mutex.synchronize do
           active_nodes = @active_view.to_a
         end
-        
+
         failed_nodes = [] of String
-        
+
         # Test connections to active view nodes
         active_nodes.each do |node|
           begin
@@ -181,18 +181,18 @@ module Gossip
             failed_nodes << node
           end
         end
-      
+
         # Process failed nodes
         failed_nodes.each do |node|
           handle_node_failure(node)
         end
-      
+
         # Check if we need to promote passive nodes
         should_promote = false
         @views_mutex.synchronize do
           should_promote = @active_view.size < MIN_ACTIVE
         end
-        
+
         # Call promote outside of the mutex lock if needed
         if should_promote
           promote_passive_node
@@ -206,11 +206,11 @@ module Gossip
         @views_mutex.synchronize do
           all_nodes = (@active_view | @passive_view).to_a
         end
-        
+
         if all_nodes.size > 0
           target = all_nodes.sample
           shuffle_nodes = all_nodes.sample([SHUFFLE_SIZE, all_nodes.size].min)
-          
+
           begin
             shuffle_msg = Messages::Membership::Shuffle.new(@id, shuffle_nodes)
             send_message(target, shuffle_msg)
@@ -239,13 +239,13 @@ module Gossip
         @views_mutex.synchronize do
           active_nodes = @active_view.to_a
         end
-        
+
         # Send to all active view members
         active_nodes.each do |node|
           @failures_mutex.synchronize do
             next if @failed_nodes.includes?(node)
           end
-          
+
           begin
             # Use eager push for initial broadcast to speed up propagation
             send_message(node, msg)
@@ -255,15 +255,15 @@ module Gossip
             handle_node_failure(node)
           end
         end
-        
+
         # Return the message ID so applications can track it if needed
         message_id
       end
-      
+
       # Background fiber to handle message recovery
       private def handle_message_recovery
         while @network.running
-          sleep(Time::Span.new(seconds: REQUEST_RETRY_INTERVAL.to_i, nanoseconds: ((REQUEST_RETRY_INTERVAL % 1) * 1_000_000_000).to_i))      
+          sleep(Time::Span.new(seconds: REQUEST_RETRY_INTERVAL.to_i, nanoseconds: ((REQUEST_RETRY_INTERVAL % 1) * 1_000_000_000).to_i))
           # Get messages that need recovery
           messages_to_recover = {} of String => Array(String)
           @messages_mutex.synchronize do
@@ -271,22 +271,22 @@ module Gossip
               messages_to_recover[message_id] = providers.dup unless providers.empty?
             end
           end
-          
+
           next if messages_to_recover.empty?
-          
+
           # Try to recover each missing message
           messages_to_recover.each do |message_id, providers|
             @pending_requests_mutex.synchronize do
               next unless @pending_requests.includes?(message_id)
             end
-            
+
             # Try each provider
             success = false
             providers.shuffle.each do |provider|
               @failures_mutex.synchronize do
                 next if @failed_nodes.includes?(provider)
               end
-              
+
               begin
                 request_msg = Messages::Broadcast::MessageRequest.new(@id, message_id, false)
                 send_message(provider, request_msg)
@@ -297,14 +297,14 @@ module Gossip
                 handle_node_failure(provider)
               end
             end
-            
+
             # If no providers worked, try someone from active view as last resort
             unless success
               active_nodes = [] of String
               @views_mutex.synchronize do
                 active_nodes = @active_view.to_a
               end
-              
+
               active_nodes.shuffle.each do |node|
                 begin
                   request_msg = Messages::Broadcast::MessageRequest.new(@id, message_id, false)

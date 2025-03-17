@@ -95,7 +95,7 @@ module Gossip
         @views_mutex.synchronize do
           active_nodes_snapshot = @active_view.to_a.reject { |n| n == sender || @failed_nodes.includes?(n) }
         end
-        
+
         forward_count = Math.min(active_nodes_snapshot.size, 2) # Forward to at most 2 other nodes
         if forward_count > 0
           targets = active_nodes_snapshot.sample(forward_count)
@@ -116,14 +116,14 @@ module Gossip
       def handle_forward_join(message : Messages::Membership::ForwardJoin)
         new_node = message.new_node
         ttl = message.ttl
-        
+
         if ttl > 0
           # Get a snapshot of active view
           active_nodes = [] of String
           @views_mutex.synchronize do
             active_nodes = @active_view.to_a
           end
-          
+
           active_nodes.each do |node|
             next if node == message.sender
             begin
@@ -146,19 +146,19 @@ module Gossip
       def handle_shuffle(message : Messages::Membership::Shuffle)
         sender = message.sender
         received_nodes = message.nodes
-        
+
         # Create a snapshot of combined views
         combined_view = [] of String
         @views_mutex.synchronize do
           combined_view = (@active_view | @passive_view).to_a
         end
-        
+
         own_nodes = combined_view.sample([SHUFFLE_SIZE, combined_view.size].min)
-        
+
         begin
           reply_msg = Messages::Membership::ShuffleReply.new(@id, own_nodes)
           send_message(sender, reply_msg)
-          
+
           # Update passive view with received nodes
           @views_mutex.synchronize do
             received_nodes.each do |node|
@@ -177,7 +177,7 @@ module Gossip
       # Handle a shuffle reply
       def handle_shuffle_reply(message : Messages::Membership::ShuffleReply)
         received_nodes = message.nodes
-        
+
         @views_mutex.synchronize do
           received_nodes.each do |node|
             if node != @id && !@active_view.includes?(node) && @passive_view.size < MAX_PASSIVE
@@ -203,10 +203,10 @@ module Gossip
         # Process suggested active nodes
         message.active_nodes.each do |node|
           next if node == @id
-          
+
           @views_mutex.synchronize do
             next if @active_view.includes?(node)
-            
+
             if @active_view.size < MAX_ACTIVE
               # Try to establish bidirectional connection by sending a join
               begin
@@ -247,7 +247,7 @@ module Gossip
       def handle_broadcast(message : Messages::Broadcast::BroadcastMessage)
         message_id = message.message_id
         sender = message.sender
-        
+
         # Use mutex for thread safety
         already_received = false
         @messages_mutex.synchronize do
@@ -257,7 +257,7 @@ module Gossip
             @message_contents[message_id] = message.content
           end
         end
-        
+
         if !already_received
           debug_log "Node #{@id}: Received broadcast '#{message.content}' from #{sender}"
 
@@ -270,7 +270,7 @@ module Gossip
           # Forward immediately to all active view nodes except sender
           active_nodes.each do |node|
             next if node == sender
-            
+
             @failures_mutex.synchronize do
               next if @failed_nodes.includes?(node)
             end
@@ -298,12 +298,12 @@ module Gossip
       def handle_lazy_push(message : Messages::Broadcast::LazyPushMessage)
         message_id = message.message_id
         sender = message.sender
-        
+
         # Use mutex for thread safety
         should_request = false
         @messages_mutex.synchronize do
           should_request = !@received_messages.includes?(message_id)
-          
+
           if should_request
             # Add this sender as a potential provider for this message
             if @missing_messages.has_key?(message_id)
@@ -313,13 +313,13 @@ module Gossip
             end
           end
         end
-        
+
         if should_request
           @pending_requests_mutex.synchronize do
             # Only send request if not already pending
             if !@pending_requests.includes?(message_id)
               @pending_requests << message_id
-              
+
               # Request the missing message
               request_msg = Messages::Broadcast::MessageRequest.new(@id, message_id, true)
               begin
@@ -339,13 +339,13 @@ module Gossip
       def handle_message_request(message : Messages::Broadcast::MessageRequest)
         message_id = message.message_id
         sender = message.sender
-        
+
         # Get content if we have it
         content = nil
         @messages_mutex.synchronize do
           content = @message_contents[message_id]?
         end
-        
+
         if content
           begin
             response_msg = Messages::Broadcast::MessageResponse.new(@id, message_id, content)
@@ -364,40 +364,40 @@ module Gossip
       def handle_message_response(message : Messages::Broadcast::MessageResponse)
         message_id = message.message_id
         content = message.content
-        
+
         # Use mutex for thread safety
         was_missing = false
         @messages_mutex.synchronize do
           was_missing = @missing_messages.has_key?(message_id)
-          
+
           if was_missing
             @missing_messages.delete(message_id)
             @received_messages << message_id
             @message_contents[message_id] = content
           end
         end
-        
+
         @pending_requests_mutex.synchronize do
           @pending_requests.delete(message_id)
         end
-        
+
         if was_missing
           debug_log "Node #{@id}: Recovered missing message #{message_id}"
-          
+
           # Get active view snapshot
           active_nodes = [] of String
           @views_mutex.synchronize do
             active_nodes = @active_view.to_a
           end
-          
+
           # Forward to active view with eager push
           active_nodes.each do |node|
             next if node == message.sender
-            
+
             @failures_mutex.synchronize do
               next if @failed_nodes.includes?(node)
             end
-            
+
             begin
               forward_msg = Messages::Broadcast::BroadcastMessage.new(@id, message_id, content)
               send_message(node, forward_msg)
@@ -409,7 +409,7 @@ module Gossip
           end
         end
       end
-      
+
       # Handle heartbeat message
       private def handle_heartbeat(message : Messages::Heartbeat::Heartbeat)
         # Send acknowledgment
@@ -420,7 +420,7 @@ module Gossip
           debug_log "Node #{@id}: Failed to send heartbeat ack to #{message.sender}: #{ex.message}"
         end
       end
-      
+
       # Handle heartbeat acknowledgment
       private def handle_heartbeat_ack(message : Messages::Heartbeat::HeartbeatAck)
         # Node is alive, nothing to do

@@ -31,7 +31,7 @@ module Gossip
   alias MessageResponse = Messages::Broadcast::MessageResponse
   alias Heartbeat = Messages::Heartbeat::Heartbeat
   alias HeartbeatAck = Messages::Heartbeat::HeartbeatAck
-  
+
   alias NodeAddress = Network::NodeAddress
   alias NetworkNode = Network::NetworkNode
   alias Node = Protocol::Node

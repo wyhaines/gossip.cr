@@ -129,7 +129,7 @@ describe "Gossip Protocol" do
 
         # Verify active view size constraint
         node1.active_view.size.should eq(Node::MAX_ACTIVE)
-        
+
         # The passive view should not be empty - it contains nodes from:
         # 1. Active view displacement when the view becomes full
         # 2. ForwardJoin messages with TTL=0 (part of the join propagation)

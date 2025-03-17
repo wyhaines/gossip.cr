@@ -1,5 +1,5 @@
 require "../src/gossip"
-require "../src/debug"  # Import the debug macro
+require "../src/debug" # Import the debug macro
 
 # Terminal UI Helper class
 class TerminalUI
@@ -13,7 +13,7 @@ class TerminalUI
   RESTORE_CURSOR  = "\033[u"
   HIDE_CURSOR     = "\033[?25l"
   SHOW_CURSOR     = "\033[?25h"
-  
+
   # Colors
   RESET  = "\033[0m"
   RED    = "\033[31m"
@@ -22,7 +22,7 @@ class TerminalUI
   BLUE   = "\033[34m"
   CYAN   = "\033[36m"
   BOLD   = "\033[1m"
-  
+
   # Properties
   property status_lines : Int32 = 6
   property input_buffer : String = ""
@@ -31,39 +31,39 @@ class TerminalUI
   property terminal_height : Int32 = 0
   property terminal_width : Int32 = 0
   property status_text : String = ""
-  
+
   # Mutex to prevent UI corruption
   @ui_mutex = Mutex.new
-  
+
   def initialize
     # Get terminal size
     update_terminal_size
-    
+
     # Setup terminal and cleanup on exit
     setup_terminal
     at_exit { restore_terminal }
   end
-  
+
   def setup_terminal
     # Hide cursor during operation
     print HIDE_CURSOR
     clear_screen
   end
-  
+
   def restore_terminal
     # Restore cursor and terminal state
     print "#{CLEAR_SCREEN}#{CURSOR_TO_START}#{SHOW_CURSOR}"
   end
-  
+
   def update_terminal_size
     # Get terminal size using tput if available
     width_output = `tput cols`.strip rescue "80"
     height_output = `tput lines`.strip rescue "24"
-    
+
     @terminal_width = width_output.to_i
     @terminal_height = height_output.to_i
   end
-  
+
   def add_message(message : String)
     @ui_mutex.synchronize do
       @messages << message
@@ -74,14 +74,14 @@ class TerminalUI
       redraw
     end
   end
-  
+
   def update_status(status_text : String)
     @ui_mutex.synchronize do
       @status_text = status_text
       redraw
     end
   end
-  
+
   def handle_keypress(key : Char)
     @ui_mutex.synchronize do
       case key
@@ -99,34 +99,34 @@ class TerminalUI
     end
     return nil
   end
-  
+
   def clear_screen
     print "#{CLEAR_SCREEN}#{CURSOR_TO_START}"
   end
-  
+
   def redraw
     # Reset the terminal state completely
-    print CLEAR_SCREEN           # Clear the entire screen
-    print "\033[H"               # Move cursor to home position (0,0)
-    
+    print CLEAR_SCREEN # Clear the entire screen
+    print "\033[H"     # Move cursor to home position (0,0)
+
     # Draw header
     puts "#{BOLD}#{BLUE}=== Gossip Protocol Demo ===#{RESET}"
     puts "#{YELLOW}Messages:#{RESET}"
-    
+
     # Calculate available height for the message area
     message_area_height = @terminal_height - @status_lines - 5
-    message_area_height = 5 if message_area_height < 5  # Ensure minimum height
-    
+    message_area_height = 5 if message_area_height < 5 # Ensure minimum height
+
     # Select messages to display
     displayed_messages = @messages.size > message_area_height ? @messages[-message_area_height..-1] : @messages
-    
+
     # Draw message area
     if displayed_messages.empty?
       puts "  No messages yet"
     else
       displayed_messages.each do |msg|
         # Process and wrap each message
-        lines = wrap_text(msg, @terminal_width - 4)  # -4 for indent and safety margin
+        lines = wrap_text(msg, @terminal_width - 4) # -4 for indent and safety margin
         lines.each do |line|
           print "  " # Indent
           print line
@@ -134,51 +134,51 @@ class TerminalUI
         end
       end
     end
-    
+
     # Draw status area
-    print "\r\n"  # Ensure we start on a new line
+    print "\r\n" # Ensure we start on a new line
     print "#{YELLOW}#{BOLD}=== Network Status ===#{RESET}\r\n"
     if @status_text
       @status_text.lines.each do |line|
-        print line.chomp  # Remove any existing line endings
-        print "\r\n"      # Add explicit CR+LF
+        print line.chomp # Remove any existing line endings
+        print "\r\n"     # Add explicit CR+LF
       end
     end
-    
+
     # Draw input area at the bottom
-    print "\r\n"  # Ensure we start on a new line
+    print "\r\n" # Ensure we start on a new line
     print "#{CYAN}Enter message (or commands: /status, /help, /nodes, /quit):#{RESET}\r\n"
     print "> #{@input_buffer}"
-    
+
     # Flush output to ensure everything is displayed
     STDOUT.flush
   end
-  
+
   # Helper to wrap text to fit the terminal width
   private def wrap_text(text : String, width : Int32) : Array(String)
     result = [] of String
-    
+
     text.lines.each do |line|
       # Process each line of the message
-      remaining = line.chomp  # Remove existing line endings
-      
+      remaining = line.chomp # Remove existing line endings
+
       while remaining.size > width
         # Find a good break point
         break_at = width
         while break_at > 0 && !remaining[break_at].ascii_whitespace?
           break_at -= 1
         end
-        
+
         # If no good break found, force a break at width
         break_at = width if break_at == 0
-        
+
         result << remaining[0...break_at]
-        remaining = remaining[break_at..-1].lstrip  # Remove leading whitespace from remainder
+        remaining = remaining[break_at..-1].lstrip # Remove leading whitespace from remainder
       end
-      
+
       result << remaining unless remaining.empty?
     end
-    
+
     result
   end
 end
@@ -189,13 +189,13 @@ class DemoNode < Node
   @operation_in_progress = false
   @operation_mutex = Mutex.new
   @ui : TerminalUI
-  
+
   def initialize(id : String, network : NetworkNode)
     super(id, network)
     @ui = TerminalUI.new
     update_status
   end
-  
+
   def handle_broadcast(message : BroadcastMessage)
     if !@received_messages.includes?(message.message_id)
       @messages_mutex.synchronize do
@@ -212,14 +212,14 @@ class DemoNode < Node
       @views_mutex.synchronize do
         active_nodes = @active_view.to_a
       end
-      
+
       active_nodes.each do |node|
         next if node == message.sender
-        
+
         @failures_mutex.synchronize do
           next if @failed_nodes.includes?(node)
         end
-        
+
         begin
           if rand < @lazy_push_probability
             lazy_msg = LazyPushMessage.new(@id, message.message_id)
@@ -248,33 +248,33 @@ class DemoNode < Node
         str << "  Active nodes: #{active_view.empty? ? "None" : active_view.to_a.join(", ")}\n"
         str << "  Passive nodes: #{passive_view.empty? ? "None" : passive_view.to_a.join(", ")}\n"
       end
-      
+
       @failures_mutex.synchronize do
         unless @failed_nodes.empty?
           str << "  Failed nodes: #{@failed_nodes.to_a.join(", ")}\n"
         end
       end
-      
+
       @messages_mutex.synchronize do
         str << "  Messages received: #{@received_messages.size}\n"
         str << "  Missing messages: #{@missing_messages.keys.size}\n"
       end
     end
-    
+
     @ui.update_status(status)
   end
-  
+
   # Asynchronous broadcast with timeout
   def async_broadcast(message : String)
     @operation_mutex.synchronize do
       @operation_in_progress = true
     end
-    
+
     @ui.add_message("#{TerminalUI::YELLOW}Sending message...#{TerminalUI::RESET}")
-    
+
     # Create a channel to wait for completion
     done_channel = Channel(Bool).new(1)
-    
+
     spawn do
       begin
         message_id = broadcast(message)
@@ -285,23 +285,23 @@ class DemoNode < Node
         done_channel.send(false)
       end
     end
-    
+
     # Set timeout to avoid blocking indefinitely
     spawn do
       sleep 5.seconds
       done_channel.send(false) rescue nil
     end
-    
+
     # Wait for completion or timeout
     success = done_channel.receive
-    
+
     @operation_mutex.synchronize do
       @operation_in_progress = false
     end
     update_status
     success
   end
-  
+
   # Start input processing fiber
   def start_input_processing
     spawn do
@@ -311,12 +311,12 @@ class DemoNode < Node
       end
     end
   end
-  
+
   # Queue input for processing
   def queue_input(input : String)
     @input_channel.send(input) rescue nil
   end
-  
+
   # Process input commands
   private def process_input(input : String)
     case input.strip
@@ -334,7 +334,7 @@ class DemoNode < Node
       async_broadcast(input)
     end
   end
-  
+
   # More detailed node information
   private def print_nodes_detail
     status = String.build do |str|
@@ -356,7 +356,7 @@ class DemoNode < Node
           end
         end
       end
-      
+
       str << "\n#{TerminalUI::YELLOW}Passive Nodes:#{TerminalUI::RESET}\n"
       @views_mutex.synchronize do
         if @passive_view.empty?
@@ -366,10 +366,10 @@ class DemoNode < Node
         end
       end
     end
-    
+
     @ui.add_message(status)
   end
-  
+
   def print_help
     help_text = <<-HELP
     #{TerminalUI::YELLOW}Available commands:#{TerminalUI::RESET}
@@ -380,7 +380,7 @@ class DemoNode < Node
       
     Any other input will be broadcast as a message to all connected nodes.
     HELP
-    
+
     @ui.add_message(help_text)
   end
 end
@@ -393,7 +393,7 @@ def handle_raw_input(node : DemoNode)
   begin
     # Put terminal in raw mode
     system("stty raw -echo")
-    
+
     while node.network.running
       if char = STDIN.raw &.read_char
         case char
@@ -428,11 +428,11 @@ when "bootstrap"
   address = NodeAddress.new("localhost", 7001, "node1@localhost:7001")
   network = NetworkNode.new(address)
   node = DemoNode.new("node1@localhost:7001", network)
-  
+
   # Start asynchronous input processing
   node.start_input_processing
   handle_raw_input(node)
-  
+
   # Clean shutdown
   network.close
 when "join"
@@ -464,7 +464,7 @@ when "join"
   # Start asynchronous input processing
   node.start_input_processing
   handle_raw_input(node)
-  
+
   # Clean shutdown
   network.close
 when "help", "-h", "--help"

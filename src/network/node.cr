@@ -16,11 +16,11 @@ module Gossip
       property running : Bool
       @node : Protocol::Node? = nil
       @connections_mutex = Mutex.new
-      
+
       # Configuration settings
-      SOCKET_TIMEOUT       = 5.0  # Seconds
-      SOCKET_READ_TIMEOUT  = 10.0 # Seconds for read operations
-      CONNECTION_RETRIES   = 3    # Number of retries for send operations
+      SOCKET_TIMEOUT      =  5.0 # Seconds
+      SOCKET_READ_TIMEOUT = 10.0 # Seconds for read operations
+      CONNECTION_RETRIES  =    3 # Number of retries for send operations
 
       def initialize(@address)
         @server = TCPServer.new(@address.host, @address.port)
@@ -72,7 +72,7 @@ module Gossip
           # Set timeouts on client socket
           client.read_timeout = SOCKET_READ_TIMEOUT.seconds
           client.write_timeout = SOCKET_TIMEOUT.seconds
-          
+
           while @running
             message = read_message(client)
             debug_log "Received #{message.type} message from #{message.sender}"
@@ -206,7 +206,7 @@ module Gossip
             @connections_mutex.synchronize do
               @connections.delete(to)
             end
-            
+
             if remaining_attempts > 0 && @running
               debug_log "Failed to send message to #{to}, retrying... (#{remaining_attempts} attempts left): #{ex.message}"
             elsif @running
@@ -216,7 +216,7 @@ module Gossip
             end
           end
         end
-        
+
         # If we get here with no successful send and we're still running,
         # raise an exception to notify the caller
         if @running
@@ -231,7 +231,7 @@ module Gossip
         @connections_mutex.synchronize do
           socket = @connections[node_id]?
         end
-        
+
         if socket
           begin
             # Test if connection is still alive
