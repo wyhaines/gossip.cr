@@ -21,6 +21,7 @@ module Gossip
       SOCKET_TIMEOUT      =  5.0 # Seconds
       SOCKET_READ_TIMEOUT = 10.0 # Seconds for read operations
       CONNECTION_RETRIES  =    3 # Number of retries for send operations
+      MAX_MESSAGE_SIZE    = 1024 * 1024 # 1MB maximum message size
 
       def initialize(@address)
         @server = TCPServer.new(@address.host, @address.port)
@@ -74,35 +75,21 @@ module Gossip
           client.write_timeout = SOCKET_TIMEOUT.seconds
 
           while @running
-            message = read_message(client)
-            debug_log "Received #{message.type} message from #{message.sender}"
+            begin
+              message = read_message(client)
+              debug_log "Received #{message.type} message from #{message.sender}"
 
-            # Clean up the sender ID if it's malformed
-            sender = message.sender
-            if sender =~ /(.+@.+:\d+)@.+:\d+/
-              sender = $1
-              debug_log "Cleaned up malformed sender ID from #{message.sender} to #{sender}"
-            end
-
-            case message
-            when Messages::Membership::Join
-              remote_id = sender
-              # Store connection for future use if we don't already have one
-              @connections_mutex.synchronize do
-                if @connections.has_key?(remote_id)
-                  debug_log "Already have connection for #{remote_id}, closing old one"
-                  @connections[remote_id].close rescue nil
-                end
-                debug_log "Storing new connection for #{remote_id}"
-                @connections[remote_id] = client
+              # Clean up the sender ID if it's malformed
+              sender = message.sender
+              if sender =~ /(.+@.+:\d+)@.+:\d+/
+                sender = $1
+                debug_log "Cleaned up malformed sender ID from #{message.sender} to #{sender}"
               end
-              # Update message sender before queuing
-              message = Messages::Membership::Join.new(sender)
-              @message_queue.send(message)
-              debug_log "Queued Join message from #{remote_id}"
-            else
-              if remote_id.empty?
+
+              case message
+              when Messages::Membership::Join
                 remote_id = sender
+                # Store connection for future use if we don't already have one
                 @connections_mutex.synchronize do
                   if @connections.has_key?(remote_id)
                     debug_log "Already have connection for #{remote_id}, closing old one"
@@ -111,9 +98,36 @@ module Gossip
                   debug_log "Storing new connection for #{remote_id}"
                   @connections[remote_id] = client
                 end
+                # Update message sender before queuing
+                message = Messages::Membership::Join.new(sender)
+                @message_queue.send(message)
+                debug_log "Queued Join message from #{remote_id}"
+              else
+                if remote_id.empty?
+                  remote_id = sender
+                  @connections_mutex.synchronize do
+                    if @connections.has_key?(remote_id)
+                      debug_log "Already have connection for #{remote_id}, closing old one"
+                      @connections[remote_id].close rescue nil
+                    end
+                    debug_log "Storing new connection for #{remote_id}"
+                    @connections[remote_id] = client
+                  end
+                end
+                @message_queue.send(message)
+                debug_log "Queued #{message.type} message from #{remote_id}"
               end
-              @message_queue.send(message)
-              debug_log "Queued #{message.type} message from #{remote_id}"
+            rescue ex : JSON::ParseException
+              # Handle JSON parsing errors more gracefully
+              debug_log "JSON parsing error with #{remote_id}: #{ex.message}"
+              # Continue and try to read the next message if possible
+              # This avoids killing the connection on minor parsing issues
+              if ex_message = ex.message
+	        if ex_message.includes?("<EOF>") || ex_message.includes?("unexpected end of input")
+                  # Connection likely closed or message truncated, exit the loop
+                  raise IO::Error.new("Connection closed or truncated message")
+                end
+	      end
             end
           end
         rescue ex : IO::Error | Socket::Error | IO::TimeoutError
@@ -129,47 +143,83 @@ module Gossip
         end
       end
 
-      # Read a message from a socket with timeout
+      # Read a message from a socket with timeout and improved error handling
       private def read_message(socket : TCPSocket) : Messages::Base::Message
         # Read the length prefix (4 bytes)
         len_bytes = Bytes.new(4)
         bytes_read = socket.read_fully?(len_bytes)
-        raise IO::Error.new("Connection closed") unless bytes_read
+        
+        if bytes_read.nil? || bytes_read < 4
+          raise IO::Error.new("Connection closed while reading message length")
+        end
 
         # Check if this is a connection test (all bytes should be 0)
         if len_bytes.all? { |b| b == 0 }
           # Send acknowledgment
-          socket.write(len_bytes)
-          socket.flush
+          begin
+            socket.write(len_bytes)
+            socket.flush
+          rescue ex : IO::Error | Socket::Error
+            raise IO::Error.new("Failed to send connection test ACK: #{ex.message}")
+          end
           return read_message(socket)
         end
 
         len = IO::ByteFormat::NetworkEndian.decode(Int32, len_bytes)
-        raise IO::Error.new("Invalid message length: #{len}") if len <= 0 || len > 1024*1024 # Sanity check
+        
+        # Validate message length for security and to prevent memory issues
+        if len <= 0
+          raise IO::Error.new("Invalid message length: #{len} (non-positive)")
+        elsif len > MAX_MESSAGE_SIZE
+          raise IO::Error.new("Message too large: #{len} bytes (max: #{MAX_MESSAGE_SIZE})")
+        end
 
+        # Allocate buffer and read the full message
         message_bytes = Bytes.new(len)
         bytes_read = socket.read_fully?(message_bytes)
-        raise IO::Error.new("Connection closed") unless bytes_read
+        
+        if bytes_read.nil? || bytes_read < len
+          raise IO::Error.new("Connection closed while reading message body (got #{bytes_read || 0} of #{len} bytes)")
+        end
 
+        # Convert bytes to string and parse JSON
         message_json = String.new(message_bytes)
-        debug_log "Received message: #{message_json}" # Debug log
+        
+        # Verify we have valid JSON before attempting to parse
+        if message_json.empty?
+          raise JSON::ParseException.new("Empty message", 1, 1)
+        end
 
-        # Parse message based on type
-        msg_data = JSON.parse(message_json)
-        case msg_data["type"].as_s
-        when "Join"             then Messages::Membership::Join.from_json(message_json)
-        when "ForwardJoin"      then Messages::Membership::ForwardJoin.from_json(message_json)
-        when "Shuffle"          then Messages::Membership::Shuffle.from_json(message_json)
-        when "ShuffleReply"     then Messages::Membership::ShuffleReply.from_json(message_json)
-        when "InitViews"        then Messages::Membership::InitViews.from_json(message_json)
-        when "BroadcastMessage" then Messages::Broadcast::BroadcastMessage.from_json(message_json)
-        when "LazyPushMessage"  then Messages::Broadcast::LazyPushMessage.from_json(message_json)
-        when "MessageRequest"   then Messages::Broadcast::MessageRequest.from_json(message_json)
-        when "MessageResponse"  then Messages::Broadcast::MessageResponse.from_json(message_json)
-        when "Heartbeat"        then Messages::Heartbeat::Heartbeat.from_json(message_json)
-        when "HeartbeatAck"     then Messages::Heartbeat::HeartbeatAck.from_json(message_json)
-        else
-          raise "Unknown message type: #{msg_data["type"]}"
+        debug_log "Received message: #{message_json[0..50]}..." # Debug log (truncated for readability)
+
+        begin
+          # Parse message based on type
+          msg_data = JSON.parse(message_json)
+          
+          unless msg_data.as_h?.try &.has_key?("type")
+            raise JSON::ParseException.new("Missing 'type' field in message", 1, 1)
+          end
+          
+          msg_type = msg_data["type"].as_s
+          
+          case msg_type
+          when "Join"             then Messages::Membership::Join.from_json(message_json)
+          when "ForwardJoin"      then Messages::Membership::ForwardJoin.from_json(message_json)
+          when "Shuffle"          then Messages::Membership::Shuffle.from_json(message_json)
+          when "ShuffleReply"     then Messages::Membership::ShuffleReply.from_json(message_json)
+          when "InitViews"        then Messages::Membership::InitViews.from_json(message_json)
+          when "BroadcastMessage" then Messages::Broadcast::BroadcastMessage.from_json(message_json)
+          when "LazyPushMessage"  then Messages::Broadcast::LazyPushMessage.from_json(message_json)
+          when "MessageRequest"   then Messages::Broadcast::MessageRequest.from_json(message_json)
+          when "MessageResponse"  then Messages::Broadcast::MessageResponse.from_json(message_json)
+          when "Heartbeat"        then Messages::Heartbeat::Heartbeat.from_json(message_json)
+          when "HeartbeatAck"     then Messages::Heartbeat::HeartbeatAck.from_json(message_json)
+          else
+            raise ArgumentError.new("Unknown message type: #{msg_type}")
+          end
+        rescue ex : JSON::ParseException | TypeCastError
+          debug_log "Error parsing message JSON: #{ex.message}, content: #{message_json[0..100]}..."
+          raise ex # Re-raise after logging
         end
       end
 
