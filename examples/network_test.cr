@@ -1,5 +1,6 @@
 require "../src/gossip"
 require "option_parser"
+require "wait_group"
 
 # Basic node settings
 node_role = "" # "bootstrap", "target" or "test"
@@ -43,12 +44,12 @@ class SimpleTestNode < Node
   property expected_node_count : Int32
   property test_message_count : Int32
   property ack_wait_time : Int32
-  
+
   # Mutex for safe access to ack tracking
   @ack_mutex = Mutex.new
   # Track last activity timestamp for dynamic timeout
   @last_ack_time : Time::Span = Time.monotonic
-  
+
   def initialize(id : String, network : NetworkNode, @node_role : String,
                  @expected_node_count : Int32 = 5,
                  @test_message_count : Int32 = 5,
@@ -111,7 +112,7 @@ class SimpleTestNode < Node
         if original_content.includes?("||")
           parts = original_content.split("||", 2)
           original_id = parts[0]
-          
+
           # Safely update ACK tracking with mutex
           @ack_mutex.synchronize do
             if @sent_messages.has_key?(original_id)
@@ -120,7 +121,7 @@ class SimpleTestNode < Node
               @received_acks[original_id] << real_sender
               log "Added ACK from #{real_sender} for message #{original_id}"
               log "Current ACK count for #{original_id}: #{@received_acks[original_id].size}"
-              
+
               # Update last activity timestamp whenever we receive an ACK
               @last_ack_time = Time.monotonic
             else
@@ -139,7 +140,7 @@ class SimpleTestNode < Node
 
   def log_message_status
     log "\n=== MESSAGE STATUS ===\n"
-    
+
     # Use mutex for thread-safe access
     @ack_mutex.synchronize do
       log "Sent messages (#{@sent_messages.size}):"
@@ -160,7 +161,7 @@ class SimpleTestNode < Node
       log "\nPassive view (#{@passive_view.size} nodes):"
       log "  #{@passive_view.to_a.join(", ")}"
     end
-    
+
     log "=====================\n"
   end
 
@@ -199,7 +200,7 @@ class SimpleTestNode < Node
     @ack_mutex.synchronize do
       @sent_messages[message_id] = content
     end
-    
+
     log "Stored message ID for tracking: #{message_id} -> #{content}"
     log "Sending test message: #{content} (ID: #{message_id})"
     broadcast(full_content)
@@ -210,86 +211,85 @@ class SimpleTestNode < Node
   # Wait for ACKs with dynamic timeout that resets on activity
   def wait_for_all_acks(message_ids : Array(String), expected_count : Int32, max_wait_time : Int32) : Bool
     log "\n---> Waiting for ACKs for #{message_ids.size} messages (expecting #{expected_count} ACKs per message)...\n"
-    
+
     start_time = Time.monotonic
     last_log_time = start_time
     last_status_time = start_time
-    
+
     # Initialize the last activity time
     @ack_mutex.synchronize do
       @last_ack_time = Time.monotonic
     end
-    
+
     # Keep track of completed messages
     completed_messages = Set(String).new
-    
+
     while true
       current_time = Time.monotonic
       elapsed = current_time - start_time
-      
+
       # Get the latest activity timestamp under mutex protection
       last_activity_time = @ack_mutex.synchronize do
         @last_ack_time
       end
-      
+
       # Time since last activity
       idle_time = current_time - last_activity_time
-      
+
       # Calculate current progress
       completed_count = 0
       total_acks = 0
       message_status = {} of String => Int32
-      
+
       @ack_mutex.synchronize do
         message_ids.each do |msg_id|
           ack_count = (@received_acks[msg_id]? || Set(String).new).size
           message_status[msg_id] = ack_count
           total_acks += ack_count
-          
+
           if ack_count >= expected_count && !completed_messages.includes?(msg_id)
             completed_messages << msg_id
             log "✅ Message #{msg_id} received all expected ACKs"
           end
         end
-        
+
         completed_count = completed_messages.size
       end
-      
+
       # Log progress every second
       if (current_time - last_log_time).total_seconds >= 1.0
         remaining = message_ids.size - completed_count
         avg_acks_per_message = total_acks.to_f / message_ids.size
         pct_complete = (completed_count.to_f / message_ids.size * 100).round(2)
-        
+
         log "Progress: #{completed_count}/#{message_ids.size} messages complete (#{pct_complete}%)"
         log "Average ACKs per message: #{avg_acks_per_message.round(2)}/#{expected_count}"
         log "Time elapsed: #{elapsed.total_seconds.round(2)}s, Idle time: #{idle_time.total_seconds.round(2)}s"
-        
+
         last_log_time = current_time
       end
-      
+
       # Log detailed status every 5 seconds
       if (current_time - last_status_time).total_seconds >= 5.0
         log_message_status
         last_status_time = current_time
       end
-      
+
       # Success condition: all messages have received expected ACKs
       if completed_count >= message_ids.size
         log "✅ SUCCESS: All #{message_ids.size} messages received their expected ACKs"
         return true
       end
-      
+
       # Timeout conditions:
       # 1. Exceeded max wait time AND haven't seen activity for at least 3 seconds
       # 2. No activity for a long time (2x the max wait time)
-      if (elapsed.total_seconds > max_wait_time && idle_time.total_seconds > 15.0) || 
+      if (elapsed.total_seconds > max_wait_time && idle_time.total_seconds > 15.0) ||
          (idle_time.total_seconds > max_wait_time * 2)
-         
         # Log timeout details
         log "❌ TIMEOUT: Only #{completed_count}/#{message_ids.size} messages completed"
         log "Last activity was #{idle_time.total_seconds.round(2)}s ago"
-        
+
         # Log incomplete messages
         log "\nIncomplete messages:"
         @ack_mutex.synchronize do
@@ -299,12 +299,12 @@ class SimpleTestNode < Node
             log "  #{msg_id}: #{ack_count}/#{expected_count} ACKs"
           end
         end
-        
+
         log_message_status
         return false
       end
-      
-      sleep(0.1.seconds)
+
+      sleep(0.001.seconds)
     end
   end
 
@@ -312,7 +312,7 @@ class SimpleTestNode < Node
   def run_test_sequence
     log "Network status before test:"
     log_message_status
-    
+
     # Expected ACKs = nodes minus ourselves
     expected_acks = @expected_node_count - 1
     log "Expecting #{expected_acks} ACKs for each message"
@@ -325,7 +325,7 @@ class SimpleTestNode < Node
     log "===== Starting basic connectivity test..."
     msg_id = send_test_message("Basic connectivity test")
     log "===== Message ID: #{msg_id}"
-    
+
     basic_test_ids = [msg_id]
     if !wait_for_all_acks(basic_test_ids, expected_acks, @ack_wait_time)
       log "❌ Basic connectivity test failed"
@@ -334,26 +334,33 @@ class SimpleTestNode < Node
 
     log "✅ Basic connectivity test passed\n"
     sleep(2.seconds)
-    
+
     # Multi-message flood test
     if @test_message_count > 1
       log "===== Starting flood test with #{@test_message_count} messages..."
-      
+
       # Send all messages as fast as possible
       message_ids = [] of String
+      wg = WaitGroup.new(@test_message_count)
       @test_message_count.times do |i|
-        msg_id = send_test_message("Flood test message #{i + 1}")
-        message_ids << msg_id
+        spawn do
+          msg_id = send_test_message("Flood test message #{i + 1}")
+          message_ids << msg_id
+        ensure
+          wg.done
+        end
       end
+
+      wg.wait
       
       log "===== Sent #{message_ids.size} messages, now waiting for ACKs..."
-      
+
       # Wait for ACKs from all messages
       if !wait_for_all_acks(message_ids, expected_acks, @ack_wait_time)
         log "❌ Flood test failed - not all messages received ACKs"
         return false
       end
-      
+
       log "✅ Flood test passed successfully - all messages received expected ACKs\n"
     end
 
