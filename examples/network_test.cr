@@ -155,7 +155,7 @@ class SimpleTestNode < Node
   
   # Wait for ACKs with timeout
   def wait_for_acks(message_id : String, expected_count : Int32, timeout_seconds : Int32) : Bool
-    log "--->  Waiting for #{timeout_seconds} seconds for #{expected_count} ACKs for message #{message_id}..."
+    log "\n--->  Waiting for #{timeout_seconds} seconds for #{expected_count} ACKs for message #{message_id}...\n"
     start_time = Time.monotonic
     last_log_time = start_time
     
@@ -212,13 +212,14 @@ class SimpleTestNode < Node
     # Basic connectivity test
     log "===== Starting basic connectivity test..."
     msg_id = send_test_message("Basic connectivity test")
+    log "===== Message ID: #{msg_id}"
     if !wait_for_acks(msg_id, expected_acks, @ack_wait_time)
       log "❌ Basic connectivity test failed"
       return false
     end
     
-    log "✅ Basic connectivity test passed"
-    
+    log "✅ Basic connectivity test passed\n"
+    15.times {sleep(1.second)}
     # Multi-message test
     if @test_message_count > 1
       log "===== Sending #{@test_message_count} additional test messages..."
@@ -226,18 +227,19 @@ class SimpleTestNode < Node
       
       @test_message_count.times do |i|
         msg_id = send_test_message("Test message #{i+1}")
+        log "\n***** Message ID: #{msg_id}\n"
         if !wait_for_acks(msg_id, expected_acks, @ack_wait_time)
           log "❌ Message #{i+1} failed to receive all ACKs"
           success = false
           break
         end
-        sleep(0.2.seconds) # Short delay between messages
+        sleep(2.seconds) # Short delay between messages
       end
       
       if success
-        log "✅ All messages received ACKs successfully"
+        log "✅ All messages received ACKs successfully\n"
       else
-        log "❌ Some messages failed to receive all ACKs"
+        log "❌ Some messages failed to receive all ACKs\n"
         return false
       end
     end
@@ -248,6 +250,9 @@ class SimpleTestNode < Node
 end
 
 puts "Starting #{node_role} node #{node_id} on port #{port}"
+
+active_connections = 0
+passive_connections = 0
 
 # Initialize network components
 address = NodeAddress.new("localhost", port, node_id)
@@ -273,7 +278,15 @@ if node_role == "bootstrap"
   end
   
   # Wait forever
-  sleep
+  while true
+    if node.active_view.size != active_connections || node.passive_view.size != passive_connections
+      active_connections = node.active_view.size
+      passive_connections = node.passive_view.size
+      puts "[#{node_id}] Active connections: #{active_connections}, Passive connections: #{passive_connections}"
+      puts "[#{node_id}] Active connections: #{node.active_view.to_a.join(", ")}, Passive connections: #{node.passive_view.to_a.join(", ")}"
+    end
+    sleep(1.second)
+  end
 end
 
 # Target and test nodes need to join the network
@@ -292,7 +305,10 @@ if node_role == "target" || node_role == "test"
       sleep(5.seconds)
       
       if !node.active_view.empty?
-        puts "[#{node_id}] Successfully joined network with #{node.active_view.size} connections"
+        active_connections = node.active_view.size
+        passive_connections = node.passive_view.size
+        puts "[#{node_id}] Successfully joined network with #{active_connections} active and #{passive_connections} passive connections"
+        puts "[#{node_id}] Active connections: #{node.active_view.to_a.join(", ")}, Passive connections: #{node.passive_view.to_a.join(", ")}"
         success = true
         break
       end
@@ -340,5 +356,13 @@ if node_role == "target"
   end
   
   # Wait forever
-  sleep
+  while true
+    if node.active_view.size != active_connections || node.passive_view.size != passive_connections
+      active_connections = node.active_view.size
+      passive_connections = node.passive_view.size
+      puts "[#{node_id}] Active connections: #{active_connections}, Passive connections: #{passive_connections}"
+      puts "[#{node_id}] Active connections: #{node.active_view.to_a.join(", ")}, Passive connections: #{node.passive_view.to_a.join(", ")}"
+    end
+    sleep(1.second)
+  end
 end
