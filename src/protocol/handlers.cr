@@ -1,0 +1,430 @@
+require "./node"
+require "../messages/membership"
+require "../messages/broadcast"
+require "../messages/heartbeat"
+require "../debug"
+
+module Gossip
+  module Protocol
+    # Extension of Node class with message handlers
+    class Node
+      # Handle incoming messages based on their type
+      def handle_message(message : Messages::Base::Message)
+        case message
+        when Messages::Membership::Join
+          handle_join(message)
+        when Messages::Membership::ForwardJoin
+          handle_forward_join(message)
+        when Messages::Membership::Shuffle
+          handle_shuffle(message)
+        when Messages::Membership::ShuffleReply
+          handle_shuffle_reply(message)
+        when Messages::Membership::InitViews
+          handle_init_views(message)
+        when Messages::Broadcast::BroadcastMessage
+          handle_broadcast(message)
+        when Messages::Broadcast::LazyPushMessage
+          handle_lazy_push(message)
+        when Messages::Broadcast::MessageRequest
+          handle_message_request(message)
+        when Messages::Broadcast::MessageResponse
+          handle_message_response(message)
+        when Messages::Heartbeat::Heartbeat
+          handle_heartbeat(message)
+        when Messages::Heartbeat::HeartbeatAck
+          handle_heartbeat_ack(message)
+        else
+          debug_log "Node #{@id}: Unknown message type"
+        end
+      end
+
+      # Handle a new node joining via this node
+      def handle_join(message : Messages::Membership::Join)
+        sender = message.sender
+        debug_log "Node #{@id}: Received JOIN from #{sender}"
+
+        # Remove from failed nodes if it was there
+        @failures_mutex.synchronize do
+          @failed_nodes.delete(sender)
+        end
+
+        # Use mutex for thread safety
+        @views_mutex.synchronize do
+          # If we're already connected, just update views
+          if @active_view.includes?(sender)
+            debug_log "Node #{@id}: Already connected to #{sender}"
+            return
+          end
+
+          # Add to active view if there's space
+          if @active_view.size < MAX_ACTIVE
+            @active_view << sender
+            debug_log "Node #{@id}: Added #{sender} to active view"
+          else
+            # Move random node to passive view
+            displaced = @active_view.to_a.sample
+            @active_view.delete(displaced)
+            @passive_view << displaced unless displaced == sender || @failed_nodes.includes?(displaced)
+            @active_view << sender
+            debug_log "Node #{@id}: Displaced #{displaced} to passive view"
+          end
+        end
+
+        # Get view snapshots for thread safety
+        active_nodes = [] of String
+        passive_nodes = [] of String
+        @views_mutex.synchronize do
+          # Using to_a.reject to create new arrays for sending
+          active_nodes = @active_view.to_a.reject { |n| n == sender || @failed_nodes.includes?(n) }
+          passive_nodes = @passive_view.to_a.reject { |n| @failed_nodes.includes?(n) }
+        end
+
+        # Send our views to the new node
+        begin
+          init_msg = Messages::Membership::InitViews.new(@id, active_nodes, passive_nodes)
+          send_message(sender, init_msg)
+          debug_log "Node #{@id}: Sent InitViews to #{sender}"
+        rescue ex
+          debug_log "Node #{@id}: Failed to send InitViews to #{sender}: #{ex.message}"
+          handle_node_failure(sender)
+          return
+        end
+
+        # Propagate join to some nodes in our active view
+        active_nodes_snapshot = [] of String
+        @views_mutex.synchronize do
+          active_nodes_snapshot = @active_view.to_a.reject { |n| n == sender || @failed_nodes.includes?(n) }
+        end
+        
+        forward_count = Math.min(active_nodes_snapshot.size, 2) # Forward to at most 2 other nodes
+        if forward_count > 0
+          targets = active_nodes_snapshot.sample(forward_count)
+          targets.each do |target|
+            begin
+              forward_msg = Messages::Membership::ForwardJoin.new(@id, sender, TTL)
+              send_message(target, forward_msg)
+              debug_log "Node #{@id}: Forwarded join from #{sender} to #{target}"
+            rescue ex
+              debug_log "Node #{@id}: Failed to forward join to #{target}: #{ex.message}"
+              handle_node_failure(target)
+            end
+          end
+        end
+      end
+
+      # Handle propagation of a join message
+      def handle_forward_join(message : Messages::Membership::ForwardJoin)
+        new_node = message.new_node
+        ttl = message.ttl
+        
+        if ttl > 0
+          # Get a snapshot of active view
+          active_nodes = [] of String
+          @views_mutex.synchronize do
+            active_nodes = @active_view.to_a
+          end
+          
+          active_nodes.each do |node|
+            next if node == message.sender
+            begin
+              forward_msg = Messages::Membership::ForwardJoin.new(@id, new_node, ttl - 1)
+              send_message(node, forward_msg)
+            rescue ex
+              debug_log "Node #{@id}: Failed to forward join to #{node}: #{ex.message}"
+              handle_node_failure(node)
+            end
+          end
+        else
+          @views_mutex.synchronize do
+            @passive_view << new_node unless @active_view.includes?(new_node) || new_node == @id
+          end
+          debug_log "Node #{@id}: Added #{new_node} to passive view"
+        end
+      end
+
+      # Handle an incoming shuffle request
+      def handle_shuffle(message : Messages::Membership::Shuffle)
+        sender = message.sender
+        received_nodes = message.nodes
+        
+        # Create a snapshot of combined views
+        combined_view = [] of String
+        @views_mutex.synchronize do
+          combined_view = (@active_view | @passive_view).to_a
+        end
+        
+        own_nodes = combined_view.sample([SHUFFLE_SIZE, combined_view.size].min)
+        
+        begin
+          reply_msg = Messages::Membership::ShuffleReply.new(@id, own_nodes)
+          send_message(sender, reply_msg)
+          
+          # Update passive view with received nodes
+          @views_mutex.synchronize do
+            received_nodes.each do |node|
+              if node != @id && !@active_view.includes?(node) && @passive_view.size < MAX_PASSIVE
+                @passive_view << node
+              end
+            end
+          end
+          debug_log "Node #{@id}: Shuffled with #{sender}"
+        rescue ex
+          debug_log "Node #{@id}: Failed to send shuffle reply to #{sender}: #{ex.message}"
+          handle_node_failure(sender)
+        end
+      end
+
+      # Handle a shuffle reply
+      def handle_shuffle_reply(message : Messages::Membership::ShuffleReply)
+        received_nodes = message.nodes
+        
+        @views_mutex.synchronize do
+          received_nodes.each do |node|
+            if node != @id && !@active_view.includes?(node) && @passive_view.size < MAX_PASSIVE
+              @passive_view << node
+            end
+          end
+        end
+      end
+
+      # Initialize views for a new node
+      def handle_init_views(message : Messages::Membership::InitViews)
+        sender = message.sender
+        debug_log "Node #{@id}: Received InitViews from #{sender}"
+
+        # Add sender to our active view if not already present
+        @views_mutex.synchronize do
+          if !@active_view.includes?(sender)
+            @active_view << sender
+            debug_log "Node #{@id}: Added #{sender} to active view"
+          end
+        end
+
+        # Process suggested active nodes
+        message.active_nodes.each do |node|
+          next if node == @id
+          
+          @views_mutex.synchronize do
+            next if @active_view.includes?(node)
+            
+            if @active_view.size < MAX_ACTIVE
+              # Try to establish bidirectional connection by sending a join
+              begin
+                join_msg = Messages::Membership::Join.new(@id)
+                send_message(node, join_msg)
+                debug_log "Node #{@id}: Sent Join to suggested active node #{node}"
+              rescue ex
+                debug_log "Node #{@id}: Failed to send Join to suggested node #{node}: #{ex.message}"
+                @failures_mutex.synchronize do
+                  @failed_nodes << node
+                end
+              end
+            else
+              # Add to passive view if not full
+              if @passive_view.size < MAX_PASSIVE
+                @passive_view << node
+                debug_log "Node #{@id}: Added suggested node #{node} to passive view"
+              end
+            end
+          end
+        end
+
+        # Add passive nodes
+        @views_mutex.synchronize do
+          message.passive_nodes.each do |node|
+            next if node == @id || @active_view.includes?(node)
+            if @passive_view.size < MAX_PASSIVE
+              @passive_view << node
+              debug_log "Node #{@id}: Added #{node} to passive view"
+            end
+          end
+        end
+
+        debug_log "Node #{@id}: Initialized views - Active: #{@active_view.to_a}, Passive: #{@passive_view.to_a}"
+      end
+
+      # Handle a broadcast message (Plumtree eager/lazy push)
+      def handle_broadcast(message : Messages::Broadcast::BroadcastMessage)
+        message_id = message.message_id
+        sender = message.sender
+        
+        # Use mutex for thread safety
+        already_received = false
+        @messages_mutex.synchronize do
+          already_received = @received_messages.includes?(message_id)
+          unless already_received
+            @received_messages << message_id
+            @message_contents[message_id] = message.content
+          end
+        end
+        
+        if !already_received
+          debug_log "Node #{@id}: Received broadcast '#{message.content}' from #{sender}"
+
+          # Get active view snapshot
+          active_nodes = [] of String
+          @views_mutex.synchronize do
+            active_nodes = @active_view.to_a
+          end
+
+          # Forward immediately to all active view nodes except sender
+          active_nodes.each do |node|
+            next if node == sender
+            
+            @failures_mutex.synchronize do
+              next if @failed_nodes.includes?(node)
+            end
+
+            begin
+              # Reduced lazy push probability for faster propagation
+              if rand < @lazy_push_probability
+                lazy_msg = Messages::Broadcast::LazyPushMessage.new(@id, message_id)
+                send_message(node, lazy_msg)
+                debug_log "Node #{@id}: Sent lazy push for message to #{node}"
+              else
+                forward_msg = Messages::Broadcast::BroadcastMessage.new(@id, message_id, message.content)
+                send_message(node, forward_msg)
+                debug_log "Node #{@id}: Forwarded broadcast to #{node}"
+              end
+            rescue ex
+              debug_log "Node #{@id}: Failed to forward broadcast to #{node}: #{ex.message}"
+              handle_node_failure(node)
+            end
+          end
+        end
+      end
+
+      # Handle a lazy push notification with improved recovery
+      def handle_lazy_push(message : Messages::Broadcast::LazyPushMessage)
+        message_id = message.message_id
+        sender = message.sender
+        
+        # Use mutex for thread safety
+        should_request = false
+        @messages_mutex.synchronize do
+          should_request = !@received_messages.includes?(message_id)
+          
+          if should_request
+            # Add this sender as a potential provider for this message
+            if @missing_messages.has_key?(message_id)
+              @missing_messages[message_id] << sender unless @missing_messages[message_id].includes?(sender)
+            else
+              @missing_messages[message_id] = [sender]
+            end
+          end
+        end
+        
+        if should_request
+          @pending_requests_mutex.synchronize do
+            # Only send request if not already pending
+            if !@pending_requests.includes?(message_id)
+              @pending_requests << message_id
+              
+              # Request the missing message
+              request_msg = Messages::Broadcast::MessageRequest.new(@id, message_id, true)
+              begin
+                send_message(sender, request_msg)
+                debug_log "Node #{@id}: Requested missing message #{message_id} from #{sender}"
+              rescue ex
+                debug_log "Node #{@id}: Failed to request message from #{sender}: #{ex.message}"
+                # Don't remove from pending - will be retried by recovery process
+                handle_node_failure(sender)
+              end
+            end
+          end
+        end
+      end
+
+      # Handle a message request
+      def handle_message_request(message : Messages::Broadcast::MessageRequest)
+        message_id = message.message_id
+        sender = message.sender
+        
+        # Get content if we have it
+        content = nil
+        @messages_mutex.synchronize do
+          content = @message_contents[message_id]?
+        end
+        
+        if content
+          begin
+            response_msg = Messages::Broadcast::MessageResponse.new(@id, message_id, content)
+            send_message(sender, response_msg)
+            debug_log "Node #{@id}: Sent message response for #{message_id} to #{sender}"
+          rescue ex
+            debug_log "Node #{@id}: Failed to send message response to #{sender}: #{ex.message}"
+            handle_node_failure(sender)
+          end
+        else
+          debug_log "Node #{@id}: Requested message #{message_id} not found for #{sender}"
+        end
+      end
+
+      # Handle a message response
+      def handle_message_response(message : Messages::Broadcast::MessageResponse)
+        message_id = message.message_id
+        content = message.content
+        
+        # Use mutex for thread safety
+        was_missing = false
+        @messages_mutex.synchronize do
+          was_missing = @missing_messages.has_key?(message_id)
+          
+          if was_missing
+            @missing_messages.delete(message_id)
+            @received_messages << message_id
+            @message_contents[message_id] = content
+          end
+        end
+        
+        @pending_requests_mutex.synchronize do
+          @pending_requests.delete(message_id)
+        end
+        
+        if was_missing
+          debug_log "Node #{@id}: Recovered missing message #{message_id}"
+          
+          # Get active view snapshot
+          active_nodes = [] of String
+          @views_mutex.synchronize do
+            active_nodes = @active_view.to_a
+          end
+          
+          # Forward to active view with eager push
+          active_nodes.each do |node|
+            next if node == message.sender
+            
+            @failures_mutex.synchronize do
+              next if @failed_nodes.includes?(node)
+            end
+            
+            begin
+              forward_msg = Messages::Broadcast::BroadcastMessage.new(@id, message_id, content)
+              send_message(node, forward_msg)
+              debug_log "Node #{@id}: Forwarded recovered message to #{node}"
+            rescue ex
+              debug_log "Node #{@id}: Failed to forward recovered message to #{node}: #{ex.message}"
+              handle_node_failure(node)
+            end
+          end
+        end
+      end
+      
+      # Handle heartbeat message
+      private def handle_heartbeat(message : Messages::Heartbeat::Heartbeat)
+        # Send acknowledgment
+        ack = Messages::Heartbeat::HeartbeatAck.new(@id)
+        begin
+          send_message(message.sender, ack)
+        rescue ex
+          debug_log "Node #{@id}: Failed to send heartbeat ack to #{message.sender}: #{ex.message}"
+        end
+      end
+      
+      # Handle heartbeat acknowledgment
+      private def handle_heartbeat_ack(message : Messages::Heartbeat::HeartbeatAck)
+        # Node is alive, nothing to do
+      end
+    end
+  end
+end
