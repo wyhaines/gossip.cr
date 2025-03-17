@@ -8,7 +8,9 @@ module Gossip
         property type : String
 
         def initialize(@sender)
-          @type = self.class.name
+          # Extract just the class name without the namespace
+          full_name = self.class.name
+          @type = full_name.split("::").last
         end
       end
     end
