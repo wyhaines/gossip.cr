@@ -150,16 +150,16 @@ class SimpleTestNode < Node
 
       log "\nReceived ACKs (#{@received_acks.size} message ids):"
       @received_acks.each do |id, senders|
-        log "  #{id} -> #{senders.size} ACKs from: #{senders.to_a.join(", ")}"
+        log "  #{id} -> #{senders.size} ACKs from: #{senders.join(", ")}"
       end
     end
 
     @views_mutex.synchronize do
       log "\nActive view (#{@active_view.size} nodes):"
-      log "  #{@active_view.to_a.join(", ")}"
+      log "  #{@active_view.join(", ")}"
 
       log "\nPassive view (#{@passive_view.size} nodes):"
-      log "  #{@passive_view.to_a.join(", ")}"
+      log "  #{@passive_view.join(", ")}"
     end
 
     log "=====================\n"
@@ -169,7 +169,7 @@ class SimpleTestNode < Node
   private def forward_to_active_view(message : BroadcastMessage)
     active_nodes = [] of String
     @views_mutex.synchronize do
-      active_nodes = @active_view.to_a
+      active_nodes = @active_view
     end
 
     active_nodes.each do |node|
@@ -403,7 +403,7 @@ if node_role == "bootstrap"
       active_connections = node.active_view.size
       passive_connections = node.passive_view.size
       puts "[#{node_id}] Active connections: #{active_connections}, Passive connections: #{passive_connections}"
-      puts "[#{node_id}] Active connections: #{node.active_view.to_a.join(", ")}, Passive connections: #{node.passive_view.to_a.join(", ")}"
+      puts "[#{node_id}] Active connections: #{node.active_view.join(", ")}, Passive connections: #{node.passive_view.join(", ")}"
     end
     sleep(1.second)
   end
@@ -428,7 +428,7 @@ if node_role == "target" || node_role == "test"
         active_connections = node.active_view.size
         passive_connections = node.passive_view.size
         puts "[#{node_id}] Successfully joined network with #{active_connections} active and #{passive_connections} passive connections"
-        puts "[#{node_id}] Active connections: #{node.active_view.to_a.join(", ")}, Passive connections: #{node.passive_view.to_a.join(", ")}"
+        puts "[#{node_id}] Active connections: #{node.active_view.join(", ")}, Passive connections: #{node.passive_view.join(", ")}"
         success = true
         break
       end
@@ -481,7 +481,7 @@ if node_role == "target"
       active_connections = node.active_view.size
       passive_connections = node.passive_view.size
       puts "[#{node_id}] Active connections: #{active_connections}, Passive connections: #{passive_connections}"
-      puts "[#{node_id}] Active connections: #{node.active_view.to_a.join(", ")}, Passive connections: #{node.passive_view.to_a.join(", ")}"
+      puts "[#{node_id}] Active connections: #{node.active_view.join(", ")}, Passive connections: #{node.passive_view.join(", ")}"
     end
     sleep(1.second)
   end

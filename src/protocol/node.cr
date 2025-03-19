@@ -104,7 +104,7 @@ module Gossip
         passive_nodes = [] of String
         @views_mutex.synchronize do
           return if @active_view.size >= MIN_ACTIVE || @passive_view.empty?
-          passive_nodes = @passive_view.to_a.shuffle
+          passive_nodes = @passive_view.shuffle
         end
 
         # Try nodes from passive view until one works
@@ -139,7 +139,7 @@ module Gossip
       private def send_heartbeats
         active_nodes = [] of String
         @views_mutex.synchronize do
-          active_nodes = @active_view.to_a
+          active_nodes = @active_view
         end
 
         failed_nodes = [] of String
@@ -165,7 +165,7 @@ module Gossip
         # Get a snapshot of active view to avoid concurrent modification
         active_nodes = [] of String
         @views_mutex.synchronize do
-          active_nodes = @active_view.to_a
+          active_nodes = @active_view
         end
 
         failed_nodes = [] of String
@@ -204,7 +204,7 @@ module Gossip
         # Get a snapshot of combined views
         all_nodes = [] of String
         @views_mutex.synchronize do
-          all_nodes = (@active_view | @passive_view).to_a
+          all_nodes = (@active_view | @passive_view)
         end
 
         if all_nodes.size > 0
@@ -237,7 +237,7 @@ module Gossip
         # Get active view snapshot
         active_nodes = [] of String
         @views_mutex.synchronize do
-          active_nodes = @active_view.to_a
+          active_nodes = @active_view
         end
 
         # Send to all active view members
@@ -302,7 +302,7 @@ module Gossip
             unless success
               active_nodes = [] of String
               @views_mutex.synchronize do
-                active_nodes = @active_view.to_a
+                active_nodes = @active_view
               end
 
               active_nodes.shuffle.each do |node|

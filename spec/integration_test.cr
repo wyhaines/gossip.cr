@@ -37,7 +37,7 @@ class TestNode
   def active_view
     nodes = [] of String
     @test_node.views_mutex.synchronize do
-      nodes = @test_node.active_view.to_a
+      nodes = @test_node.active_view
     end
     nodes
   end
@@ -45,7 +45,7 @@ class TestNode
   def passive_view
     nodes = [] of String
     @test_node.views_mutex.synchronize do
-      nodes = @test_node.passive_view.to_a
+      nodes = @test_node.passive_view
     end
     nodes
   end
@@ -107,7 +107,7 @@ class TestNodeImpl < Node
     if !already_received
       active_nodes = [] of String
       @views_mutex.synchronize do
-        active_nodes = @active_view.to_a
+        active_nodes = @active_view
       end
 
       active_nodes.each do |node|

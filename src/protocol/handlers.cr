@@ -59,10 +59,13 @@ module Gossip
           # Add to active view if there's space
           if @active_view.size < MAX_ACTIVE
             @active_view << sender
+            if @passive_view.includes?(sender)
+              @passive_view.delete(sender)
+            end
             debug_log "Node #{@id}: Added #{sender} to active view"
           else
             # Move random node to passive view
-            displaced = @active_view.to_a.sample
+            displaced = @active_view.sample
             @active_view.delete(displaced)
             @passive_view << displaced unless displaced == sender || @failed_nodes.includes?(displaced)
             @active_view << sender
@@ -74,9 +77,9 @@ module Gossip
         active_nodes = [] of String
         passive_nodes = [] of String
         @views_mutex.synchronize do
-          # Using to_a.reject to create new arrays for sending
-          active_nodes = @active_view.to_a.reject { |n| n == sender || @failed_nodes.includes?(n) }
-          passive_nodes = @passive_view.to_a.reject { |n| @failed_nodes.includes?(n) }
+          # Using reject to create new arrays for sending
+          active_nodes = @active_view.reject { |n| n == sender || @failed_nodes.includes?(n) }
+          passive_nodes = @passive_view.reject { |n| @failed_nodes.includes?(n) }
         end
 
         # Send our views to the new node
@@ -93,7 +96,7 @@ module Gossip
         # Propagate join to some nodes in our active view
         active_nodes_snapshot = [] of String
         @views_mutex.synchronize do
-          active_nodes_snapshot = @active_view.to_a.reject { |n| n == sender || @failed_nodes.includes?(n) }
+          active_nodes_snapshot = @active_view.reject { |n| n == sender || @failed_nodes.includes?(n) }
         end
 
         forward_count = Math.min(active_nodes_snapshot.size, 2) # Forward to at most 2 other nodes
@@ -121,7 +124,7 @@ module Gossip
           # Get a snapshot of active view
           active_nodes = [] of String
           @views_mutex.synchronize do
-            active_nodes = @active_view.to_a
+            active_nodes = @active_view
           end
 
           active_nodes.each do |node|
@@ -150,7 +153,7 @@ module Gossip
         # Create a snapshot of combined views
         combined_view = [] of String
         @views_mutex.synchronize do
-          combined_view = (@active_view | @passive_view).to_a
+          combined_view = (@active_view | @passive_view)
         end
 
         own_nodes = combined_view.sample([SHUFFLE_SIZE, combined_view.size].min)
@@ -240,7 +243,7 @@ module Gossip
           end
         end
 
-        debug_log "Node #{@id}: Initialized views - Active: #{@active_view.to_a}, Passive: #{@passive_view.to_a}"
+        debug_log "Node #{@id}: Initialized views - Active: #{@active_view}, Passive: #{@passive_view}"
       end
 
       # Handle a broadcast message (Plumtree eager/lazy push)
@@ -264,7 +267,7 @@ module Gossip
           # Get active view snapshot
           active_nodes = [] of String
           @views_mutex.synchronize do
-            active_nodes = @active_view.to_a
+            active_nodes = @active_view
           end
 
           # Forward immediately to all active view nodes except sender
@@ -387,7 +390,7 @@ module Gossip
           # Get active view snapshot
           active_nodes = [] of String
           @views_mutex.synchronize do
-            active_nodes = @active_view.to_a
+            active_nodes = @active_view
           end
 
           # Forward to active view with eager push

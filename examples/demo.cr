@@ -210,7 +210,7 @@ class DemoNode < Node
       # Forward to others as per normal gossip protocol
       active_nodes = [] of String
       @views_mutex.synchronize do
-        active_nodes = @active_view.to_a
+        active_nodes = @active_view
       end
 
       active_nodes.each do |node|
@@ -245,13 +245,13 @@ class DemoNode < Node
     status = String.build do |str|
       @views_mutex.synchronize do
         str << "  Active connections: #{active_view.size}/#{MAX_ACTIVE}\n"
-        str << "  Active nodes: #{active_view.empty? ? "None" : active_view.to_a.join(", ")}\n"
-        str << "  Passive nodes: #{passive_view.empty? ? "None" : passive_view.to_a.join(", ")}\n"
+        str << "  Active nodes: #{active_view.empty? ? "None" : active_view.join(", ")}\n"
+        str << "  Passive nodes: #{passive_view.empty? ? "None" : passive_view.join(", ")}\n"
       end
 
       @failures_mutex.synchronize do
         unless @failed_nodes.empty?
-          str << "  Failed nodes: #{@failed_nodes.to_a.join(", ")}\n"
+          str << "  Failed nodes: #{@failed_nodes.join(", ")}\n"
         end
       end
 
@@ -362,7 +362,7 @@ class DemoNode < Node
         if @passive_view.empty?
           str << "  No passive connections\n"
         else
-          str << "  #{@passive_view.to_a.join(", ")}\n"
+          str << "  #{@passive_view.join(", ")}\n"
         end
       end
     end
