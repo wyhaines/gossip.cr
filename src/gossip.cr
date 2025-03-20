@@ -25,7 +25,7 @@ module Gossip
   alias Shuffle = Messages::Membership::Shuffle
   alias ShuffleReply = Messages::Membership::ShuffleReply
   alias InitViews = Messages::Membership::InitViews
-  alias Redirect = Messages::Membership::Redirect  # Add this line for the new message type
+  alias Redirect = Messages::Membership::Redirect # Add this line for the new message type
   alias BroadcastMessage = Messages::Broadcast::BroadcastMessage
   alias LazyPushMessage = Messages::Broadcast::LazyPushMessage
   alias MessageRequest = Messages::Broadcast::MessageRequest

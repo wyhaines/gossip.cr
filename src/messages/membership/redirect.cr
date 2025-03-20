@@ -12,4 +12,3 @@ module Gossip
     end
   end
 end
-

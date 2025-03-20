@@ -352,7 +352,7 @@ class SimpleTestNode < Node
       end
 
       wg.wait
-      
+
       log "===== Sent #{message_ids.size} messages, now waiting for ACKs..."
 
       # Wait for ACKs from all messages

@@ -194,22 +194,22 @@ module Gossip
             # Move excess nodes to passive view
             node_to_move = @active_view.to_a.sample # Pick a random node
             @active_view.delete(node_to_move)
-            
+
             # Only add to passive if not already there
             unless @passive_view.includes?(node_to_move) || node_to_move == @id
               @passive_view << node_to_move
             end
-            
+
             debug_log "Node #{@id}: Enforced MAX_ACTIVE by moving #{node_to_move} to passive view"
           end
-          
+
           # Enforce passive view size limit too
           while @passive_view.size > MAX_PASSIVE
             node_to_remove = @passive_view.to_a.sample
             @passive_view.delete(node_to_remove)
             debug_log "Node #{@id}: Enforced MAX_PASSIVE by removing #{node_to_remove}"
           end
-          
+
           # Ensure no duplicates between views (belt and suspenders approach)
           duplicates = @active_view & @passive_view
           unless duplicates.empty?
