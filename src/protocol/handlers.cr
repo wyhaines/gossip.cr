@@ -21,6 +21,8 @@ module Gossip
           handle_shuffle_reply(message)
         when Messages::Membership::InitViews
           handle_init_views(message)
+        when Messages::Membership::Redirect
+          handle_redirect(message)
         when Messages::Broadcast::BroadcastMessage
           handle_broadcast(message)
         when Messages::Broadcast::LazyPushMessage
@@ -38,8 +40,65 @@ module Gossip
         end
       end
 
+            def handle_redirect(message : Messages::Membership::Redirect)
+        sender = message.sender
+        target_nodes = message.target_nodes
+        
+        debug_log "Node #{@id}: Received REDIRECT from #{sender} suggesting to connect to: #{target_nodes.join(", ")}"
+        
+        # Check if we need more connections first
+        need_connection = false
+        @views_mutex.synchronize do
+          need_connection = @active_view.size < MIN_ACTIVE
+        end
+        
+        # Only attempt to connect if we have few connections or by random chance
+        # This prevents all redirected nodes from performing the same action
+        if need_connection || rand < 0.5
+          # Try to connect to one of the suggested nodes
+          target_nodes.shuffle.each do |target|
+            # Avoid connecting to ourselves
+            next if target == @id
+            
+            # Skip if we're already connected to this node
+            @views_mutex.synchronize do
+              next if @active_view.includes?(target)
+            end
+            
+            # Try to establish connection
+            begin
+              join_msg = Messages::Membership::Join.new(@id)
+              send_message(target, join_msg)
+              debug_log "Node #{@id}: Connected to redirect-suggested node #{target}"
+              
+              # Optionally, we could remove our connection to the original node
+              # to better distribute the network, but only after successfully 
+              # connecting to a new node
+              if rand < 0.3  # 30% chance to rebalance by dropping original connection
+                @views_mutex.synchronize do
+                  if @active_view.includes?(sender)
+                    @active_view.delete(sender)
+                    @passive_view << sender
+                    debug_log "Node #{@id}: Moved #{sender} to passive view after redirect"
+                  end
+                end
+              end
+              
+              break  # Stop after one successful connection
+            rescue ex
+              debug_log "Node #{@id}: Failed to connect to redirect-suggested node #{target}: #{ex.message}"
+              @failures_mutex.synchronize do
+                @failed_nodes << target
+              end
+            end
+          end
+        else
+          debug_log "Node #{@id}: Skipped redirect connection (sufficient connections)"
+        end
+      end
+
       # Handle a new node joining via this node
-      def handle_join(message : Messages::Membership::Join)
+            def handle_join(message : Messages::Membership::Join)
         sender = message.sender
         debug_log "Node #{@id}: Received JOIN from #{sender}"
 
@@ -49,6 +108,7 @@ module Gossip
         end
 
         # Use mutex for thread safety
+        should_redistribute = false
         @views_mutex.synchronize do
           # If we're already connected, just update views
           if @active_view.includes?(sender)
@@ -59,9 +119,8 @@ module Gossip
           # Add to active view if there's space
           if @active_view.size < MAX_ACTIVE
             @active_view << sender
-            if @passive_view.includes?(sender)
-              @passive_view.delete(sender)
-            end
+            # Remove from passive view if present (fixes duplication bug)
+            @passive_view.delete(sender)
             debug_log "Node #{@id}: Added #{sender} to active view"
           else
             # Move random node to passive view
@@ -69,8 +128,13 @@ module Gossip
             @active_view.delete(displaced)
             @passive_view << displaced unless displaced == sender || @failed_nodes.includes?(displaced)
             @active_view << sender
+            # Remove from passive view if present (fixes duplication bug)
+            @passive_view.delete(sender)
             debug_log "Node #{@id}: Displaced #{displaced} to passive view"
           end
+          
+          # Check if we're significantly over the MAX_ACTIVE limit (bootstrap node issue)
+          should_redistribute = @active_view.size > MAX_ACTIVE + 1
         end
 
         # Get view snapshots for thread safety
@@ -93,7 +157,28 @@ module Gossip
           return
         end
 
-        # Propagate join to some nodes in our active view
+        # Implement connection redistribution for bootstrap node or overloaded nodes
+        if should_redistribute
+          candidates = [] of String
+          @views_mutex.synchronize do
+            # Select a few nodes from our active view for redistribution
+            candidates = @active_view.reject { |n| n == sender }.to_a.sample(2)
+          end
+          
+          if !candidates.empty?
+            begin
+              # Send a redirect message suggesting alternative nodes to connect to
+              redirect_msg = Messages::Membership::Redirect.new(@id, candidates)
+              send_message(sender, redirect_msg)
+              debug_log "Node #{@id}: Sent redistribution suggestion to #{sender}"
+            rescue ex
+              debug_log "Node #{@id}: Failed to send redistribution suggestion: #{ex.message}"
+              # Proceed with normal join process even if redistribution fails
+            end
+          end
+        end
+
+        # Propagate join to some nodes in our active view (original code)
         active_nodes_snapshot = [] of String
         @views_mutex.synchronize do
           active_nodes_snapshot = @active_view.reject { |n| n == sender || @failed_nodes.includes?(n) }
@@ -146,6 +231,19 @@ module Gossip
       end
 
       # Handle an incoming shuffle request
+      def handle_shuffle_reply(message : Messages::Membership::ShuffleReply)
+        received_nodes = message.nodes
+
+        @views_mutex.synchronize do
+          received_nodes.each do |node|
+            # Fix: Don't add nodes that are in active view to passive view
+            if node != @id && !@active_view.includes?(node) && @passive_view.size < MAX_PASSIVE
+              @passive_view << node
+            end
+          end
+        end
+      end 
+
       def handle_shuffle(message : Messages::Membership::Shuffle)
         sender = message.sender
         received_nodes = message.nodes
@@ -177,19 +275,6 @@ module Gossip
         end
       end
 
-      # Handle a shuffle reply
-      def handle_shuffle_reply(message : Messages::Membership::ShuffleReply)
-        received_nodes = message.nodes
-
-        @views_mutex.synchronize do
-          received_nodes.each do |node|
-            if node != @id && !@active_view.includes?(node) && @passive_view.size < MAX_PASSIVE
-              @passive_view << node
-            end
-          end
-        end
-      end
-
       # Initialize views for a new node
       def handle_init_views(message : Messages::Membership::InitViews)
         sender = message.sender
@@ -199,6 +284,8 @@ module Gossip
         @views_mutex.synchronize do
           if !@active_view.includes?(sender)
             @active_view << sender
+            # Fix: Remove from passive view if present (fixes duplication bug)
+            @passive_view.delete(sender)
             debug_log "Node #{@id}: Added #{sender} to active view"
           end
         end

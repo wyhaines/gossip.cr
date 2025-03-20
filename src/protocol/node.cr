@@ -104,7 +104,7 @@ module Gossip
         passive_nodes = [] of String
         @views_mutex.synchronize do
           return if @active_view.size >= MIN_ACTIVE || @passive_view.empty?
-          passive_nodes = @passive_view.shuffle
+          passive_nodes = @passive_view.to_a.shuffle
         end
 
         # Try nodes from passive view until one works
@@ -185,6 +185,39 @@ module Gossip
         # Process failed nodes
         failed_nodes.each do |node|
           handle_node_failure(node)
+        end
+
+        # New code: Enforce MAX_ACTIVE limit periodically
+        @views_mutex.synchronize do
+          # Enforce active view size limit
+          while @active_view.size > MAX_ACTIVE
+            # Move excess nodes to passive view
+            node_to_move = @active_view.to_a.sample # Pick a random node
+            @active_view.delete(node_to_move)
+            
+            # Only add to passive if not already there
+            unless @passive_view.includes?(node_to_move) || node_to_move == @id
+              @passive_view << node_to_move
+            end
+            
+            debug_log "Node #{@id}: Enforced MAX_ACTIVE by moving #{node_to_move} to passive view"
+          end
+          
+          # Enforce passive view size limit too
+          while @passive_view.size > MAX_PASSIVE
+            node_to_remove = @passive_view.to_a.sample
+            @passive_view.delete(node_to_remove)
+            debug_log "Node #{@id}: Enforced MAX_PASSIVE by removing #{node_to_remove}"
+          end
+          
+          # Ensure no duplicates between views (belt and suspenders approach)
+          duplicates = @active_view & @passive_view
+          unless duplicates.empty?
+            duplicates.each do |node|
+              @passive_view.delete(node)
+              debug_log "Node #{@id}: Removed duplicate node #{node} from passive view"
+            end
+          end
         end
 
         # Check if we need to promote passive nodes
@@ -305,7 +338,7 @@ module Gossip
                 active_nodes = @active_view
               end
 
-              active_nodes.shuffle.each do |node|
+              active_nodes.to_a.shuffle.each do |node|
                 begin
                   request_msg = Messages::Broadcast::MessageRequest.new(@id, message_id, false)
                   send_message(node, request_msg)
