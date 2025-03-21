@@ -258,38 +258,52 @@ module Gossip
       def broadcast(content : String)
         message_id = "#{@id}-#{Time.utc.to_unix_ms}-#{rand(1000)}"
         msg = Messages::Broadcast::BroadcastMessage.new(@id, message_id, content)
-
+      
         # Mark as received by us
         @messages_mutex.synchronize do
           @received_messages << message_id
           @message_contents[message_id] = content
         end
-
+      
         debug_log "Node #{@id}: Broadcasting message '#{content}'"
-
+      
         # Get active view snapshot
         active_nodes = [] of String
         @views_mutex.synchronize do
-          active_nodes = @active_view
+          active_nodes = @active_view.reject { |node| @failed_nodes.includes?(node) }
         end
-
-        # Send to all active view members
+      
+        # Use a WaitGroup to track completion of parallel sends
+        wg = WaitGroup.new(active_nodes.size)
+        
+        # Send to all active view members in parallel using fibers
         active_nodes.each do |node|
-          @failures_mutex.synchronize do
-            next if @failed_nodes.includes?(node)
-          end
-
-          begin
-            # Use eager push for initial broadcast to speed up propagation
-            send_message(node, msg)
-            debug_log "Node #{@id}: Sent broadcast to #{node}"
-          rescue ex
-            debug_log "Node #{@id}: Failed to send broadcast to #{node}: #{ex.message}"
-            handle_node_failure(node)
+          spawn do
+            begin
+              # Use eager push for initial broadcast to speed up propagation
+              send_message(node, msg)
+              debug_log "Node #{@id}: Sent broadcast to #{node}"
+            rescue ex
+              debug_log "Node #{@id}: Failed to send broadcast to #{node}: #{ex.message}"
+              handle_node_failure(node)
+            ensure
+              wg.done
+            end
           end
         end
-
-        # Return the message ID so applications can track it if needed
+      
+        # TODO: This doesn't work, but a channel based cooperative interrupt could be constructed to implement this intention.
+        # spawn do
+        #   begin
+        #     Fiber.timeout(5.seconds) do
+        #       wg.wait
+        #     end
+        #   rescue ex : Fiber::TimeoutError
+        #     debug_log "Node #{@id}: Broadcast send timeout - some nodes may not have received message"
+        #   end
+        # end
+      
+        # Return the message ID immediately without waiting for sends to complete
         message_id
       end
 

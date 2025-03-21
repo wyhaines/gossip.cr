@@ -3,6 +3,7 @@ require "../messages/membership"
 require "../messages/broadcast"
 require "../messages/heartbeat"
 require "../debug"
+require "wait_group"
 
 module Gossip
   module Protocol
@@ -337,50 +338,65 @@ module Gossip
       def handle_broadcast(message : Messages::Broadcast::BroadcastMessage)
         message_id = message.message_id
         sender = message.sender
-
+        content = message.content
+      
         # Use mutex for thread safety
         already_received = false
         @messages_mutex.synchronize do
           already_received = @received_messages.includes?(message_id)
           unless already_received
             @received_messages << message_id
-            @message_contents[message_id] = message.content
+            @message_contents[message_id] = content
           end
         end
-
+      
         if !already_received
-          debug_log "Node #{@id}: Received broadcast '#{message.content}' from #{sender}"
-
+          debug_log "Node #{@id}: Received broadcast '#{content}' from #{sender}"
+      
           # Get active view snapshot
           active_nodes = [] of String
           @views_mutex.synchronize do
-            active_nodes = @active_view
+            active_nodes = @active_view.reject { |node| node == sender || @failed_nodes.includes?(node) }
           end
-
-          # Forward immediately to all active view nodes except sender
+      
+          # Skip forwarding if there are no nodes to forward to
+          return if active_nodes.empty?
+      
+          # Use a WaitGroup to track forwarding completion
+          wg = WaitGroup.new(active_nodes.size)
+          
+          # Forward immediately to all active view nodes except sender in parallel
           active_nodes.each do |node|
-            next if node == sender
-
-            @failures_mutex.synchronize do
-              next if @failed_nodes.includes?(node)
-            end
-
-            begin
-              # Reduced lazy push probability for faster propagation
-              if rand < @lazy_push_probability
-                lazy_msg = Messages::Broadcast::LazyPushMessage.new(@id, message_id)
-                send_message(node, lazy_msg)
-                debug_log "Node #{@id}: Sent lazy push for message to #{node}"
-              else
-                forward_msg = Messages::Broadcast::BroadcastMessage.new(@id, message_id, message.content)
-                send_message(node, forward_msg)
-                debug_log "Node #{@id}: Forwarded broadcast to #{node}"
+            spawn do
+              begin
+                # Use lower lazy push probability for faster propagation (could be tuned)
+                if rand < @lazy_push_probability
+                  lazy_msg = Messages::Broadcast::LazyPushMessage.new(@id, message_id)
+                  send_message(node, lazy_msg)
+                  debug_log "Node #{@id}: Sent lazy push for message to #{node}"
+                else
+                  forward_msg = Messages::Broadcast::BroadcastMessage.new(@id, message_id, content)
+                  send_message(node, forward_msg)
+                  debug_log "Node #{@id}: Forwarded broadcast to #{node}"
+                end
+              rescue ex
+                debug_log "Node #{@id}: Failed to forward broadcast to #{node}: #{ex.message}"
+                handle_node_failure(node)
+              ensure
+                wg.done
               end
-            rescue ex
-              debug_log "Node #{@id}: Failed to forward broadcast to #{node}: #{ex.message}"
-              handle_node_failure(node)
             end
           end
+      
+        # TODO: This doesn't work, but a channel based cooperative interrupt could be constructed to implement this intention.
+        #     begin
+        #       Fiber.timeout(5.seconds) do
+        #         wg.wait
+        #       end
+        #     rescue ex : Fiber::TimeoutError
+        #       debug_log "Node #{@id}: Broadcast forward timeout - some nodes may not have received message"
+        #     end
+        #   end
         end
       end
 

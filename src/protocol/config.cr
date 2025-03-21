@@ -3,23 +3,23 @@ module Gossip
     # Protocol configuration constants
     module Config
       # View sizes
-      MAX_ACTIVE  =  5 # Max size of active view
-      MAX_PASSIVE = 10 # Max size of passive view
-      MIN_ACTIVE  =  2 # Min nodes to maintain in active view
-      MIN_PASSIVE =  3 # Min nodes to send for new node's passive view
+      MAX_ACTIVE  =  8 # Increased from 5 to allow more direct connections
+      MAX_PASSIVE = 15 # Increased from 10 for better network resilience
+      MIN_ACTIVE  =  3 # Increased from 2 to promote more connectivity
+      MIN_PASSIVE =  5 # Increased from 3 for better passive view coverage
 
-      # Protocol parameters
-      TTL            =    2 # Time-to-live for ForwardJoin
-      LAZY_PUSH_PROB = 0.05 # Probability for lazy push to improve propagation speed
+      # Protocol parameters - tuned for faster propagation
+      TTL            =    3  # Increased from 2 for better reach in larger networks
+      LAZY_PUSH_PROB = 0.03  # Decreased from 0.05 for more eager pushes
 
-      # Timing settings
-      SHUFFLE_INTERVAL       = 5.0 # Seconds between shuffles
-      SHUFFLE_SIZE           =   3 # Number of nodes to exchange in shuffle
-      HEARTBEAT_INTERVAL     = 2.0 # Seconds between heartbeats
-      REQUEST_RETRY_INTERVAL = 1.0 # Seconds between retries for message requests
+      # Timing settings - adjusted for better responsiveness
+      SHUFFLE_INTERVAL       = 10.0 # Increased from 5.0 to reduce overhead
+      SHUFFLE_SIZE           =   4  # Increased from 3 to exchange more nodes
+      HEARTBEAT_INTERVAL     = 3.0  # Increased from 2.0 to reduce overhead
+      REQUEST_RETRY_INTERVAL = 0.5  # Decreased from 1.0 for faster recovery
 
       # Recovery parameters
-      MAX_REQUEST_ATTEMPTS = 3 # Maximum number of times to request a missing message
+      MAX_REQUEST_ATTEMPTS = 5 # Increased from 3 for more robust recovery
     end
   end
 end
