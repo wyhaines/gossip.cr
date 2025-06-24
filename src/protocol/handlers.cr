@@ -282,12 +282,33 @@ module Gossip
         debug_log "Node #{@id}: Received InitViews from #{sender}"
 
         # Add sender to our active view if not already present
+        should_respond = false
         @views_mutex.synchronize do
           if !@active_view.includes?(sender)
             @active_view << sender
             # Fix: Remove from passive view if present (fixes duplication bug)
             @passive_view.delete(sender)
             debug_log "Node #{@id}: Added #{sender} to active view"
+            should_respond = true
+          end
+        end
+        
+        # Send back our own InitViews to complete the bidirectional connection
+        if should_respond
+          begin
+            # Get view snapshots for thread safety
+            active_nodes = [] of String
+            passive_nodes = [] of String
+            @views_mutex.synchronize do
+              active_nodes = @active_view.reject { |n| n == sender || @failed_nodes.includes?(n) }
+              passive_nodes = @passive_view.reject { |n| @failed_nodes.includes?(n) }
+            end
+            
+            response_msg = Messages::Membership::InitViews.new(@id, active_nodes, passive_nodes)
+            send_message(sender, response_msg)
+            debug_log "Node #{@id}: Sent InitViews response to #{sender}"
+          rescue ex
+            debug_log "Node #{@id}: Failed to send InitViews response to #{sender}: #{ex.message}"
           end
         end
 

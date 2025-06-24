@@ -130,66 +130,43 @@ module Gossip
                 debug_log "Cleaned up malformed sender ID from #{message.sender} to #{sender}"
               end
 
-              case message
-              when Messages::Membership::Join
+              # Always store connection using the sender ID, regardless of message type
+              if remote_id.empty? || remote_id != sender
                 remote_id = sender
-                # Store connection for future use if we don't already have one
                 @connections_mutex.synchronize do
                   if @connections.has_key?(remote_id)
-                    debug_log "Already have connection for #{remote_id}, closing old one"
-                    @connections[remote_id].close rescue nil
+                    # Don't close the existing connection if it's the same socket
+                    existing_socket = @connections[remote_id]
+                    if existing_socket != client
+                      debug_log "Already have connection for #{remote_id}, closing old one"
+                      existing_socket.close rescue nil
+                    end
                   end
-                  debug_log "Storing new connection for #{remote_id}"
+                  debug_log "Storing connection for #{remote_id}"
                   @connections[remote_id] = client
                 end
-                # Update message sender before queuing
+              end
+
+              # Update message if it's a Join to ensure clean sender ID
+              if message.is_a?(Messages::Membership::Join)
                 message = Messages::Membership::Join.new(sender)
+              end
 
-                # Track queue pressure before attempting to queue
+              # Track queue pressure before attempting to queue
+              if @adaptive_rate_limiting
+                @rate_limiter.pre_send
+              end
+
+              begin
+                @message_queue.send(message)
+                @rate_limiter.post_send if @adaptive_rate_limiting
+                debug_log "Queued #{message.type} message from #{remote_id}"
+              rescue ex
+                # If we added to count but failed to queue, adjust the count back
                 if @adaptive_rate_limiting
-                  @rate_limiter.pre_send
+                  @rate_limiter.post_receive
                 end
-
-                begin
-                  @message_queue.send(message)
-                  @rate_limiter.post_send if @adaptive_rate_limiting
-                  debug_log "Queued Join message from #{remote_id}"
-                rescue ex
-                  # If we added to count but failed to queue, adjust the count back
-                  if @adaptive_rate_limiting
-                    @rate_limiter.post_receive
-                  end
-                  raise ex
-                end
-              else
-                if remote_id.empty?
-                  remote_id = sender
-                  @connections_mutex.synchronize do
-                    if @connections.has_key?(remote_id)
-                      debug_log "Already have connection for #{remote_id}, closing old one"
-                      @connections[remote_id].close rescue nil
-                    end
-                    debug_log "Storing new connection for #{remote_id}"
-                    @connections[remote_id] = client
-                  end
-                end
-
-                # Track queue pressure before attempting to queue
-                if @adaptive_rate_limiting
-                  @rate_limiter.pre_send
-                end
-
-                begin
-                  @message_queue.send(message)
-                  @rate_limiter.post_send if @adaptive_rate_limiting
-                  debug_log "Queued #{message.type} message from #{remote_id}"
-                rescue ex
-                  # If we added to count but failed to queue, adjust the count back
-                  if @adaptive_rate_limiting
-                    @rate_limiter.post_receive
-                  end
-                  raise ex
-                end
+                raise ex
               end
             rescue ex : JSON::ParseException
               # Handle JSON parsing errors more gracefully
@@ -227,17 +204,6 @@ module Gossip
           raise IO::Error.new("Connection closed while reading message length")
         end
 
-        # Check if this is a connection test (all bytes should be 0)
-        if len_bytes.all? { |b| b == 0 }
-          # Send acknowledgment
-          begin
-            socket.write(len_bytes)
-            socket.flush
-          rescue ex : IO::Error | Socket::Error
-            raise IO::Error.new("Failed to send connection test ACK: #{ex.message}")
-          end
-          return read_message(socket)
-        end
 
         len = IO::ByteFormat::NetworkEndian.decode(Int32, len_bytes)
 
@@ -370,27 +336,26 @@ module Gossip
 
         if socket
           begin
-            # Test if connection is still alive
-            debug_log "Testing connection to #{node_id}"
-            test_bytes = Bytes.new(4, 0_u8) # Four zero bytes for test
-            socket.write(test_bytes)
-            socket.flush
-
-            # Wait for acknowledgment with timeout
-            socket.read_timeout = SOCKET_TIMEOUT.seconds
-            response = Bytes.new(4)
-            bytes_read = socket.read_fully?(response)
-            if !bytes_read || !response.all? { |b| b == 0 }
-              debug_log "Invalid test response from #{node_id}"
-              raise Socket::Error.new("Invalid test response")
+            # Simple connection test - just check if socket is still connected
+            # Avoid sending test bytes that break the protocol
+            debug_log "Checking existing connection to #{node_id}"
+            
+            # Check if socket is closed
+            if socket.closed?
+              raise Socket::Error.new("Socket is closed")
             end
-
+            
+            # Try to get socket info to see if it's still valid
+            socket.remote_address
+            
+            debug_log "Connection to #{node_id} appears alive, reusing it"
             return socket
           rescue ex
             debug_log "Existing connection to #{node_id} is dead: #{ex.message}"
             @connections_mutex.synchronize do
               @connections.delete(node_id)
             end
+            socket.close rescue nil
           end
         end
 
@@ -407,24 +372,14 @@ module Gossip
             socket.read_timeout = SOCKET_READ_TIMEOUT.seconds
             socket.write_timeout = SOCKET_TIMEOUT.seconds
 
-            # Send join message to identify ourselves
-            # Use the node's ID directly to avoid double-appending host:port
-            join_msg = Messages::Membership::Join.new(@node.not_nil!.id)
-            message_json = join_msg.to_json
-            message_bytes = message_json.to_slice
-            len = message_bytes.size
-
-            debug_log "Sending initial Join message (#{len} bytes): #{message_json}"
-            len_bytes = Bytes.new(4)
-            IO::ByteFormat::NetworkEndian.encode(len, len_bytes)
-            socket.write(len_bytes)
-            socket.write(message_bytes)
-            socket.flush
-
             @connections_mutex.synchronize do
               @connections[node_id] = socket
             end
-            debug_log "Successfully established connection to #{node_id}"
+            
+            # Spawn a reader fiber for the outgoing connection to make it bidirectional
+            spawn handle_client(socket)
+            
+            debug_log "Successfully established connection to #{node_id} with reader fiber"
             return socket
           rescue ex : Socket::Error | IO::TimeoutError
             debug_log "Failed to connect to #{node_id}: #{ex.message}"

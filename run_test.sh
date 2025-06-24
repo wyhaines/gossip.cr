@@ -1,7 +1,9 @@
 #!/bin/bash
 
+crystal build -p -s -t --error-trace ./examples/network_test.cr
+
 # Configuration
-NODE_COUNT=5     # Total nodes (including bootstrap)
+NODE_COUNT=5    # Total nodes (including bootstrap)
 MESSAGE_COUNT=5  # Number of test messages
 WAIT_TIME=10     # Seconds to wait for ACKs
 BASE_PORT=7001   # Starting port
@@ -32,7 +34,7 @@ PIDS+=($!)
 
 # Wait for bootstrap node to start
 echo "Waiting for bootstrap node to initialize..."
-sleep 2
+sleep 1
 
 # Start target nodes
 echo "Starting $((NODE_COUNT-2)) target nodes..."
