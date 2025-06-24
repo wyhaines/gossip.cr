@@ -248,6 +248,7 @@ module Gossip
           when "Shuffle"          then Messages::Membership::Shuffle.from_json(message_json)
           when "ShuffleReply"     then Messages::Membership::ShuffleReply.from_json(message_json)
           when "InitViews"        then Messages::Membership::InitViews.from_json(message_json)
+          when "Redirect"         then Messages::Membership::Redirect.from_json(message_json)
           when "BroadcastMessage" then Messages::Broadcast::BroadcastMessage.from_json(message_json)
           when "LazyPushMessage"  then Messages::Broadcast::LazyPushMessage.from_json(message_json)
           when "MessageRequest"   then Messages::Broadcast::MessageRequest.from_json(message_json)
