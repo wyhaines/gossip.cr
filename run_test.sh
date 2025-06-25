@@ -3,8 +3,8 @@
 crystal build -p -s -t --error-trace ./examples/network_test.cr
 
 # Configuration
-NODE_COUNT=5    # Total nodes (including bootstrap)
-MESSAGE_COUNT=5  # Number of test messages
+NODE_COUNT=10    # Total nodes (including bootstrap)
+MESSAGE_COUNT=25  # Number of test messages
 WAIT_TIME=10     # Seconds to wait for ACKs
 BASE_PORT=7001   # Starting port
 

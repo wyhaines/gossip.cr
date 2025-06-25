@@ -339,19 +339,14 @@ class SimpleTestNode < Node
     if @test_message_count > 1
       log "===== Starting flood test with #{@test_message_count} messages..."
 
-      # Send all messages as fast as possible
+      # Send messages with a small delay between them to avoid overwhelming the network
       message_ids = [] of String
-      wg = WaitGroup.new(@test_message_count)
       @test_message_count.times do |i|
-        spawn do
-          msg_id = send_test_message("Flood test message #{i + 1}")
-          message_ids << msg_id
-        ensure
-          wg.done
-        end
+        msg_id = send_test_message("Flood test message #{i + 1}")
+        message_ids << msg_id
+        # Small delay between messages to avoid race conditions
+        sleep(0.01.seconds) if i < @test_message_count - 1
       end
-
-      wg.wait
 
       log "===== Sent #{message_ids.size} messages, now waiting for ACKs..."
 

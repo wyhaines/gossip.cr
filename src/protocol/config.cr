@@ -10,7 +10,7 @@ module Gossip
 
       # Protocol parameters - tuned for faster propagation
       TTL            =    3  # Increased from 2 for better reach in larger networks
-      LAZY_PUSH_PROB = 0.03  # Decreased from 0.05 for more eager pushes
+      LAZY_PUSH_PROB = 0.0   # Set to 0 for fully eager push (no lazy push)
 
       # Timing settings - adjusted for better responsiveness
       SHUFFLE_INTERVAL       = 10.0 # Increased from 5.0 to reduce overhead

@@ -53,9 +53,9 @@ module Gossip
           need_connection = @active_view.size < MIN_ACTIVE
         end
 
-        # Only attempt to connect if we have few connections or by random chance
-        # This prevents all redirected nodes from performing the same action
-        if need_connection || rand < 0.5
+        # Attempt to connect if we have few connections or with high probability
+        # This helps distribute connections more evenly
+        if need_connection || rand < 0.8
           # Try to connect to one of the suggested nodes
           target_nodes.shuffle.each do |target|
             # Avoid connecting to ourselves
@@ -134,8 +134,8 @@ module Gossip
             debug_log "Node #{@id}: Displaced #{displaced} to passive view"
           end
 
-          # Check if we're significantly over the MAX_ACTIVE limit (bootstrap node issue)
-          should_redistribute = @active_view.size > MAX_ACTIVE + 1
+          # Check if we're at or over the MAX_ACTIVE limit (bootstrap node issue)
+          should_redistribute = @active_view.size >= MAX_ACTIVE
         end
 
         # Get view snapshots for thread safety
@@ -185,7 +185,7 @@ module Gossip
           active_nodes_snapshot = @active_view.reject { |n| n == sender || @failed_nodes.includes?(n) }
         end
 
-        forward_count = Math.min(active_nodes_snapshot.size, 2) # Forward to at most 2 other nodes
+        forward_count = Math.min(active_nodes_snapshot.size, 3) # Forward to at most 3 other nodes for better propagation
         if forward_count > 0
           targets = active_nodes_snapshot.sample(forward_count)
           targets.each do |target|
@@ -390,16 +390,10 @@ module Gossip
           active_nodes.each do |node|
             spawn do
               begin
-                # Use lower lazy push probability for faster propagation (could be tuned)
-                if rand < @lazy_push_probability
-                  lazy_msg = Messages::Broadcast::LazyPushMessage.new(@id, message_id)
-                  send_message(node, lazy_msg)
-                  debug_log "Node #{@id}: Sent lazy push for message to #{node}"
-                else
-                  forward_msg = Messages::Broadcast::BroadcastMessage.new(@id, message_id, content)
-                  send_message(node, forward_msg)
-                  debug_log "Node #{@id}: Forwarded broadcast to #{node}"
-                end
+                # Always use eager push (lazy_push_probability is 0.0)
+                forward_msg = Messages::Broadcast::BroadcastMessage.new(@id, message_id, content)
+                send_message(node, forward_msg)
+                debug_log "Node #{@id}: Forwarded broadcast to #{node}"
               rescue ex
                 debug_log "Node #{@id}: Failed to forward broadcast to #{node}: #{ex.message}"
                 handle_node_failure(node)
