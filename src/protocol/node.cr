@@ -5,6 +5,7 @@ require "../messages/broadcast"
 require "../messages/heartbeat"
 require "../network/node"
 require "./config"
+require "./dynamic_config"
 require "../debug"
 
 module Gossip
@@ -22,6 +23,7 @@ module Gossip
       property lazy_push_probability : Float64
       property network : Network::NetworkNode
       property failed_nodes : Set(String)
+      property dynamic_config : DynamicConfig
 
       # Mutexes for thread safety
       @views_mutex = Mutex.new
@@ -29,8 +31,10 @@ module Gossip
       @failures_mutex = Mutex.new
       @pending_requests = Set(String).new
       @pending_requests_mutex = Mutex.new
+      @shuffle_fiber : Fiber? = nil
+      @heartbeat_fiber : Fiber? = nil
 
-      def initialize(id : String, network : Network::NetworkNode)
+      def initialize(id : String, network : Network::NetworkNode, initial_network_size : Int32 = 10)
         @id = id
         @network = network
         @active_view = Set(String).new
@@ -40,21 +44,22 @@ module Gossip
         @missing_messages = Hash(String, Array(String)).new
         @lazy_push_probability = LAZY_PUSH_PROB
         @failed_nodes = Set(String).new
+        @dynamic_config = DynamicConfig.new(initial_network_size)
 
         # Set this node as the network's node
         @network.node = self
 
         # Start periodic shuffling and view maintenance
-        spawn do
+        @shuffle_fiber = spawn do
           while @network.running
-            sleep(Time::Span.new(seconds: SHUFFLE_INTERVAL.to_i, nanoseconds: ((SHUFFLE_INTERVAL % 1) * 1_000_000_000).to_i))
+            sleep(Time::Span.new(seconds: @dynamic_config.shuffle_interval.to_i, nanoseconds: ((@dynamic_config.shuffle_interval % 1) * 1_000_000_000).to_i))
             maintain_views
             send_shuffle
           end
         end
 
         # Start heartbeat mechanism to detect failed nodes
-        spawn do
+        @heartbeat_fiber = spawn do
           while @network.running
             sleep(Time::Span.new(seconds: HEARTBEAT_INTERVAL.to_i, nanoseconds: ((HEARTBEAT_INTERVAL % 1) * 1_000_000_000).to_i))
             send_heartbeats
@@ -103,7 +108,7 @@ module Gossip
         # Get candidate nodes from passive view
         passive_nodes = [] of String
         @views_mutex.synchronize do
-          return if @active_view.size >= MIN_ACTIVE || @passive_view.empty?
+          return if @active_view.size >= min_active_view_size || @passive_view.empty?
           passive_nodes = @passive_view.to_a.shuffle
         end
 
@@ -223,7 +228,7 @@ module Gossip
         # Check if we need to promote passive nodes
         should_promote = false
         @views_mutex.synchronize do
-          should_promote = @active_view.size < MIN_ACTIVE
+          should_promote = @active_view.size < min_active_view_size
         end
 
         # Call promote outside of the mutex lock if needed
@@ -242,7 +247,7 @@ module Gossip
 
         if all_nodes.size > 0
           target = all_nodes.sample
-          shuffle_nodes = all_nodes.sample([SHUFFLE_SIZE, all_nodes.size].min)
+          shuffle_nodes = all_nodes.sample([@dynamic_config.shuffle_size, all_nodes.size].min)
 
           begin
             shuffle_msg = Messages::Membership::Shuffle.new(@id, shuffle_nodes)
@@ -366,6 +371,43 @@ module Gossip
             end
           end
         end
+      end
+
+      # Update network size estimate based on observed nodes
+      def update_network_size_estimate
+        total_known_nodes = 0
+        @views_mutex.synchronize do
+          # Count unique nodes we know about
+          all_nodes = Set(String).new
+          all_nodes.concat(@active_view)
+          all_nodes.concat(@passive_view)
+          all_nodes << @id  # Include ourselves
+          total_known_nodes = all_nodes.size
+        end
+        
+        # Update dynamic configuration
+        @dynamic_config.update_network_size(total_known_nodes)
+        debug_log "Node #{@id}: Updated network size estimate to #{total_known_nodes}, config: #{@dynamic_config}"
+      end
+
+      # Get current max active view size from dynamic config
+      def max_active_view_size
+        @dynamic_config.max_active
+      end
+
+      # Get current min active view size from dynamic config  
+      def min_active_view_size
+        @dynamic_config.min_active
+      end
+
+      # Get current max passive view size from dynamic config
+      def max_passive_view_size
+        @dynamic_config.max_passive
+      end
+
+      # Get current min passive view size from dynamic config
+      def min_passive_view_size
+        @dynamic_config.min_passive
       end
     end
   end

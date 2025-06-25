@@ -190,8 +190,8 @@ class DemoNode < Node
   @operation_mutex = Mutex.new
   @ui : TerminalUI
 
-  def initialize(id : String, network : NetworkNode)
-    super(id, network)
+  def initialize(id : String, network : NetworkNode, initial_network_size : Int32 = 10)
+    super(id, network, initial_network_size)
     @ui = TerminalUI.new
     update_status
   end
@@ -244,7 +244,7 @@ class DemoNode < Node
   def update_status
     status = String.build do |str|
       @views_mutex.synchronize do
-        str << "  Active connections: #{active_view.size}/#{MAX_ACTIVE}\n"
+        str << "  Active connections: #{active_view.size}/#{max_active_view_size}\n"
         str << "  Active nodes: #{active_view.empty? ? "None" : active_view.join(", ")}\n"
         str << "  Passive nodes: #{passive_view.empty? ? "None" : passive_view.join(", ")}\n"
       end

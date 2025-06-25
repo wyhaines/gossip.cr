@@ -50,7 +50,7 @@ module Gossip
         # Check if we need more connections first
         need_connection = false
         @views_mutex.synchronize do
-          need_connection = @active_view.size < MIN_ACTIVE
+          need_connection = @active_view.size < min_active_view_size
         end
 
         # Attempt to connect if we have few connections or with high probability
@@ -118,7 +118,7 @@ module Gossip
           end
 
           # Add to active view if there's space
-          if @active_view.size < MAX_ACTIVE
+          if @active_view.size < max_active_view_size
             @active_view << sender
             # Remove from passive view if present (fixes duplication bug)
             @passive_view.delete(sender)
@@ -134,8 +134,8 @@ module Gossip
             debug_log "Node #{@id}: Displaced #{displaced} to passive view"
           end
 
-          # Check if we're at or over the MAX_ACTIVE limit (bootstrap node issue)
-          should_redistribute = @active_view.size >= MAX_ACTIVE
+          # Check if we're at or over the max active limit (bootstrap node issue)
+          should_redistribute = @active_view.size >= max_active_view_size
         end
 
         # Get view snapshots for thread safety
@@ -238,11 +238,14 @@ module Gossip
         @views_mutex.synchronize do
           received_nodes.each do |node|
             # Fix: Don't add nodes that are in active view to passive view
-            if node != @id && !@active_view.includes?(node) && @passive_view.size < MAX_PASSIVE
+            if node != @id && !@active_view.includes?(node) && @passive_view.size < max_passive_view_size
               @passive_view << node
             end
           end
         end
+        
+        # Update network size estimate after shuffle reply
+        update_network_size_estimate
       end
 
       def handle_shuffle(message : Messages::Membership::Shuffle)
@@ -264,7 +267,7 @@ module Gossip
           # Update passive view with received nodes
           @views_mutex.synchronize do
             received_nodes.each do |node|
-              if node != @id && !@active_view.includes?(node) && @passive_view.size < MAX_PASSIVE
+              if node != @id && !@active_view.includes?(node) && @passive_view.size < max_passive_view_size
                 @passive_view << node
               end
             end
@@ -319,7 +322,7 @@ module Gossip
           @views_mutex.synchronize do
             next if @active_view.includes?(node)
 
-            if @active_view.size < MAX_ACTIVE
+            if @active_view.size < max_active_view_size
               # Try to establish bidirectional connection by sending a join
               begin
                 join_msg = Messages::Membership::Join.new(@id)
@@ -333,7 +336,7 @@ module Gossip
               end
             else
               # Add to passive view if not full
-              if @passive_view.size < MAX_PASSIVE
+              if @passive_view.size < max_passive_view_size
                 @passive_view << node
                 debug_log "Node #{@id}: Added suggested node #{node} to passive view"
               end
@@ -353,6 +356,9 @@ module Gossip
         end
 
         debug_log "Node #{@id}: Initialized views - Active: #{@active_view}, Passive: #{@passive_view}"
+        
+        # Update network size estimate after receiving view information
+        update_network_size_estimate
       end
 
       # Handle a broadcast message (Plumtree eager/lazy push)
