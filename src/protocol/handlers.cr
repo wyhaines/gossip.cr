@@ -36,6 +36,14 @@ module Gossip
           handle_heartbeat(message)
         when Messages::Heartbeat::HeartbeatAck
           handle_heartbeat_ack(message)
+        when Messages::AntiEntropy::DigestRequest
+          handle_digest_request(message)
+        when Messages::AntiEntropy::DigestReply
+          handle_digest_reply(message)
+        when Messages::AntiEntropy::MessagesRequest
+          handle_messages_request(message)
+        when Messages::AntiEntropy::MessagesResponse
+          handle_messages_response(message)
         else
           debug_log "Node #{@id}: Unknown message type"
         end
@@ -367,57 +375,57 @@ module Gossip
         sender = message.sender
         content = message.content
       
-        # Use mutex for thread safety
-        already_received = false
+        # Make the entire message processing and forwarding atomic to prevent race conditions
+        should_forward = false
+        active_nodes = [] of String
+        
         @messages_mutex.synchronize do
-          already_received = @received_messages.includes?(message_id)
-          unless already_received
+          # Check if already received
+          if !@received_messages.includes?(message_id)
+            # Mark as received BEFORE releasing the lock
             @received_messages << message_id
             @message_contents[message_id] = content
+            should_forward = true
+            
+            # Get active nodes while still holding the messages lock
+            # This ensures consistency between message state and forwarding decision
+            @views_mutex.synchronize do
+              active_nodes = @active_view.reject { |node| node == sender || @failed_nodes.includes?(node) }
+            end
           end
         end
       
-        if !already_received
+        # Only forward if this is a new message and we have nodes to forward to
+        if should_forward && !active_nodes.empty?
           debug_log "Node #{@id}: Received broadcast '#{content}' from #{sender}"
-      
-          # Get active view snapshot
-          active_nodes = [] of String
-          @views_mutex.synchronize do
-            active_nodes = @active_view.reject { |node| node == sender || @failed_nodes.includes?(node) }
-          end
-      
-          # Skip forwarding if there are no nodes to forward to
-          return if active_nodes.empty?
-      
-          # Use a WaitGroup to track forwarding completion
-          wg = WaitGroup.new(active_nodes.size)
           
-          # Forward immediately to all active view nodes except sender in parallel
+          # Forward to each active node
           active_nodes.each do |node|
             spawn do
               begin
-                # Always use eager push (lazy_push_probability is 0.0)
-                forward_msg = Messages::Broadcast::BroadcastMessage.new(@id, message_id, content)
-                send_message(node, forward_msg)
-                debug_log "Node #{@id}: Forwarded broadcast to #{node}"
+                # Always use eager push when LAZY_PUSH_PROB is 0
+                if @lazy_push_probability == 0.0
+                  forward_msg = Messages::Broadcast::BroadcastMessage.new(@id, message_id, content)
+                  send_message(node, forward_msg)
+                  debug_log "Node #{@id}: Forwarded broadcast to #{node}"
+                else
+                  # Use hybrid push when lazy push is enabled
+                  if rand < @lazy_push_probability
+                    lazy_msg = Messages::Broadcast::LazyPushMessage.new(@id, message_id)
+                    send_message(node, lazy_msg)
+                    debug_log "Node #{@id}: Sent lazy push to #{node}"
+                  else
+                    forward_msg = Messages::Broadcast::BroadcastMessage.new(@id, message_id, content)
+                    send_message(node, forward_msg)
+                    debug_log "Node #{@id}: Forwarded broadcast to #{node}"
+                  end
+                end
               rescue ex
-                debug_log "Node #{@id}: Failed to forward broadcast to #{node}: #{ex.message}"
+                debug_log "Node #{@id}: Failed to forward to #{node}: #{ex.message}"
                 handle_node_failure(node)
-              ensure
-                wg.done
               end
             end
           end
-      
-        # TODO: This doesn't work, but a channel based cooperative interrupt could be constructed to implement this intention.
-        #     begin
-        #       Fiber.timeout(5.seconds) do
-        #         wg.wait
-        #       end
-        #     rescue ex : Fiber::TimeoutError
-        #       debug_log "Node #{@id}: Broadcast forward timeout - some nodes may not have received message"
-        #     end
-        #   end
         end
       end
 

@@ -10,9 +10,12 @@ require "./messages/base"
 require "./messages/membership"
 require "./messages/broadcast"
 require "./messages/heartbeat"
+require "./messages/anti_entropy"
 require "./network/address"
 require "./network/node"
 require "./protocol/config"
+require "./protocol/reliable_broadcast"
+require "./protocol/anti_entropy"
 require "./protocol/node"
 require "./protocol/handlers"
 
@@ -32,6 +35,10 @@ module Gossip
   alias MessageResponse = Messages::Broadcast::MessageResponse
   alias Heartbeat = Messages::Heartbeat::Heartbeat
   alias HeartbeatAck = Messages::Heartbeat::HeartbeatAck
+  alias DigestRequest = Messages::AntiEntropy::DigestRequest
+  alias DigestReply = Messages::AntiEntropy::DigestReply
+  alias MessagesRequest = Messages::AntiEntropy::MessagesRequest
+  alias MessagesResponse = Messages::AntiEntropy::MessagesResponse
 
   alias NodeAddress = Network::NodeAddress
   alias NetworkNode = Network::NetworkNode

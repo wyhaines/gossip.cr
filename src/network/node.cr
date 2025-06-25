@@ -255,6 +255,10 @@ module Gossip
           when "MessageResponse"  then Messages::Broadcast::MessageResponse.from_json(message_json)
           when "Heartbeat"        then Messages::Heartbeat::Heartbeat.from_json(message_json)
           when "HeartbeatAck"     then Messages::Heartbeat::HeartbeatAck.from_json(message_json)
+          when "DigestRequest"    then Messages::AntiEntropy::DigestRequest.from_json(message_json)
+          when "DigestReply"      then Messages::AntiEntropy::DigestReply.from_json(message_json)
+          when "MessagesRequest"  then Messages::AntiEntropy::MessagesRequest.from_json(message_json)
+          when "MessagesResponse" then Messages::AntiEntropy::MessagesResponse.from_json(message_json)
           else
             raise ArgumentError.new("Unknown message type: #{msg_type}")
           end

@@ -8,9 +8,9 @@ module Gossip
       MIN_ACTIVE  =  3 # Increased from 2 to promote more connectivity
       MIN_PASSIVE =  5 # Increased from 3 for better passive view coverage
 
-      # Protocol parameters - tuned for faster propagation
+      # Protocol parameters - tuned for reliability and efficiency
       TTL            =    3  # Increased from 2 for better reach in larger networks
-      LAZY_PUSH_PROB = 0.0   # Set to 0 for fully eager push (no lazy push)
+      LAZY_PUSH_PROB = 0.0   # Temporarily disabled - test nodes don't implement lazy push protocol
 
       # Timing settings - adjusted for better responsiveness
       SHUFFLE_INTERVAL       = 10.0 # Increased from 5.0 to reduce overhead

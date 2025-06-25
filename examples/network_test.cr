@@ -64,22 +64,21 @@ class SimpleTestNode < Node
 
   # Handle incoming broadcasts with improved ACK tracking
   def handle_broadcast(message : BroadcastMessage)
+    # First call the parent implementation to handle protocol logic
+    super(message)
+    
     message_id = message.message_id
     content = message.content
     sender = message.sender
 
-    # Check if we've already seen this message
-    already_received = false
+    # Check if this is a new message for our tracking
+    already_processed = false
     @messages_mutex.synchronize do
-      already_received = @received_messages.includes?(message_id)
-      unless already_received
-        @received_messages << message_id
-        @message_contents[message_id] = content
-      end
+      already_processed = @received_messages.includes?(message_id)
     end
 
-    # Only process if this is a new message
-    if !already_received
+    # Only process for ACK tracking if this is a new message
+    if !already_processed
       log "Received: #{content} from #{sender} (message_id: #{message_id})"
 
       if @node_role != "test" && !content.starts_with?("ACK ")
@@ -132,9 +131,6 @@ class SimpleTestNode < Node
           log "WARNING: ACK content doesn't contain expected '||' delimiter: #{original_content}"
         end
       end
-
-      # Forward message to active view
-      forward_to_active_view(message)
     end
   end
 

@@ -13,6 +13,8 @@ module Gossip
     # Node class implementing the gossip protocol
     class Node
       include Config
+      include ReliableBroadcast
+      include AntiEntropy
 
       property id : String
       property active_view : Set(String)
@@ -33,6 +35,7 @@ module Gossip
       @pending_requests_mutex = Mutex.new
       @shuffle_fiber : Fiber? = nil
       @heartbeat_fiber : Fiber? = nil
+      @anti_entropy_fiber : Fiber? = nil
 
       def initialize(id : String, network : Network::NetworkNode, initial_network_size : Int32 = 10)
         @id = id
@@ -42,9 +45,9 @@ module Gossip
         @received_messages = Set(String).new
         @message_contents = Hash(String, String).new
         @missing_messages = Hash(String, Array(String)).new
-        @lazy_push_probability = LAZY_PUSH_PROB
         @failed_nodes = Set(String).new
         @dynamic_config = DynamicConfig.new(initial_network_size)
+        @lazy_push_probability = @dynamic_config.lazy_push_probability
 
         # Set this node as the network's node
         @network.node = self
@@ -68,6 +71,9 @@ module Gossip
 
         # Start message recovery process
         spawn handle_message_recovery
+        
+        # Start anti-entropy process
+        start_anti_entropy
       end
 
       # Modified send_message to use network layer and handle failures
@@ -261,7 +267,7 @@ module Gossip
 
       # Initiate a broadcast
       def broadcast(content : String)
-        message_id = "#{@id}-#{Time.utc.to_unix_ms}-#{rand(1000)}"
+        message_id = "#{@id}-#{Time.utc.to_unix_ms}-#{rand(10000)}"
         msg = Messages::Broadcast::BroadcastMessage.new(@id, message_id, content)
       
         # Mark as received by us
@@ -278,37 +284,19 @@ module Gossip
           active_nodes = @active_view.reject { |node| @failed_nodes.includes?(node) }
         end
       
-        # Use a WaitGroup to track completion of parallel sends
-        wg = WaitGroup.new(active_nodes.size)
-        
-        # Send to all active view members in parallel using fibers
+        # Send to all active view members in parallel
         active_nodes.each do |node|
           spawn do
             begin
-              # Use eager push for initial broadcast to speed up propagation
               send_message(node, msg)
               debug_log "Node #{@id}: Sent broadcast to #{node}"
             rescue ex
               debug_log "Node #{@id}: Failed to send broadcast to #{node}: #{ex.message}"
               handle_node_failure(node)
-            ensure
-              wg.done
             end
           end
         end
-      
-        # TODO: This doesn't work, but a channel based cooperative interrupt could be constructed to implement this intention.
-        # spawn do
-        #   begin
-        #     Fiber.timeout(5.seconds) do
-        #       wg.wait
-        #     end
-        #   rescue ex : Fiber::TimeoutError
-        #     debug_log "Node #{@id}: Broadcast send timeout - some nodes may not have received message"
-        #   end
-        # end
-      
-        # Return the message ID immediately without waiting for sends to complete
+        
         message_id
       end
 
@@ -387,7 +375,11 @@ module Gossip
         
         # Update dynamic configuration
         @dynamic_config.update_network_size(total_known_nodes)
-        debug_log "Node #{@id}: Updated network size estimate to #{total_known_nodes}, config: #{@dynamic_config}"
+        
+        # Update lazy push probability based on new network size
+        @lazy_push_probability = @dynamic_config.lazy_push_probability
+        
+        debug_log "Node #{@id}: Updated network size estimate to #{total_known_nodes}, lazy_push_prob=#{@lazy_push_probability}, config: #{@dynamic_config}"
       end
 
       # Get current max active view size from dynamic config
